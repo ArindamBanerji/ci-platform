@@ -400,29 +400,34 @@ class OnboardingPipeline:
     ) -> Tuple[StageResult, Dict]:
         t0 = time.monotonic()
 
-        # Category distribution
-        category_counts: Dict[str, int] = {}
-        for alert in alerts:
-            atype = alert.get("alert_type", "").lower()
-            category = "other"
-            for keyword, cat in _CATEGORY_MAP.items():
-                if keyword in atype:
-                    category = cat
-                    break
-            category_counts[category] = category_counts.get(category, 0) + 1
+        from ci_platform.onboarding.deployment_qualification import DeploymentQualifier
 
-        total = len(alerts) or 1
-        category_dist = {k: v / total for k, v in category_counts.items()}
-        alert_volume = len(alerts) / max(days_back, 1)
+        qualifier = DeploymentQualifier()
+        qualification = qualifier.qualify(alerts, days_in_sample=days_back)
 
         config = {
-            "tau_initial": 0.10,
-            "estimated_alert_volume": round(alert_volume, 2),
-            "estimated_category_distribution": category_dist,
-            "alert_type_distribution": category_counts,
-            "category_distribution": category_dist,
-            "entity_count": 0,           # filled by caller if needed
-            "threat_indicator_count": 0,
+            "tau_initial": qualification.tau.tau_optimal,
+            "sigma_mean": qualification.noise.sigma_mean,
+            "sigma_per_factor": qualification.noise.sigma_per_factor,
+            "noise_classification": qualification.noise.classification,
+            "learning_recommended": qualification.noise.learning_recommended,
+            "recalibrate_tau": qualification.tau.recalibrate,
+            "category_distribution": qualification.category_distribution,
+            "alert_type_distribution": qualification.category_distribution,
+            "estimated_category_distribution": qualification.category_distribution,
+            "estimated_alert_volume": round(qualification.estimated_daily_volume, 2),
+            "estimated_daily_volume": qualification.estimated_daily_volume,
+            "remediations": [
+                {
+                    "factor": r.factor,
+                    "current": r.current_noise,
+                    "integration": r.integration,
+                    "after": r.expected_noise_after,
+                    "priority": r.priority,
+                }
+                for r in qualification.remediations
+            ],
+            "summary": qualification.summary,
         }
 
         dur = time.monotonic() - t0
@@ -430,7 +435,7 @@ class OnboardingPipeline:
             stage="compute", success=True,
             duration_seconds=dur,
             records_in=len(alerts), records_out=1,
-            details={"alert_volume_per_day": alert_volume},
+            details={"qualification": config},
         )
         return stage, config
 
