@@ -6,12 +6,18 @@ Three measurements from imported alert data:
   2. τ_initial: optimal temperature from mini τ sweep
   3. Remediation report: per-factor noise + recommendations
 
-Classification:
+Classification (L2 kernel — default):
   GREEN  (σ ≤ 0.105): Full value. Enable learning.
   AMBER  (0.105 < σ ≤ 0.157): Marginal. Enable with caution. Remediate.
   RED    (σ > 0.157): Do NOT enable learning. Frozen scorer only.
 
-Source: 1D noise sweep (5 personas, validated).
+Classification (DiagonalKernel — higher noise ceiling):
+  GREEN  (σ ≤ 0.157): Full value. Enable learning.
+  AMBER  (0.157 < σ ≤ 0.25): Marginal. Enable with caution. Remediate.
+  RED    (σ > 0.25): Do NOT enable learning. Frozen scorer only.
+
+Source: 1D noise sweep (5 personas, validated). DiagonalKernel validated by
+V-MV-KERNEL factorial.
 """
 
 from dataclasses import dataclass, field
@@ -24,10 +30,19 @@ FACTOR_NAMES = [
     "time_anomaly", "pattern_history", "device_trust",
 ]
 
-# Thresholds from 1D sweep
+# Thresholds from 1D sweep — L2 kernel (default)
 SIGMA_GREEN = 0.105
 SIGMA_AMBER = 0.157
 SIGMA_RED   = 0.215
+
+# Thresholds — DiagonalKernel (higher noise ceiling; validated by V-MV-KERNEL factorial)
+SIGMA_GREEN_DIAGONAL = 0.157
+SIGMA_AMBER_DIAGONAL = 0.25
+
+_THRESHOLDS = {
+    "l2":       (SIGMA_GREEN, SIGMA_AMBER),
+    "diagonal": (SIGMA_GREEN_DIAGONAL, SIGMA_AMBER_DIAGONAL),
+}
 
 # Remediation mapping: which integration reduces which factor's noise
 REMEDIATION_MAP = {
@@ -105,6 +120,9 @@ class QualificationResult:
     category_distribution: Dict[str, float]
     estimated_daily_volume: float
     summary: str                  # Human-readable one-paragraph summary
+    kernel_recommendation: str = "l2"      # "l2" or "diagonal"
+    noise_ratio: Optional[float] = None    # max(σ) / min(σ) across factors
+    rationale: str = ""                    # why this kernel was chosen
 
 
 class DeploymentQualifier:
@@ -116,23 +134,49 @@ class DeploymentQualifier:
         result = qualifier.qualify(alerts, days_in_sample=30)
     """
 
-    def qualify(self, alerts: List[Dict], days_in_sample: int = 30) -> QualificationResult:
-        noise = self.measure_noise(alerts)
+    def qualify(
+        self,
+        alerts: List[Dict],
+        days_in_sample: int = 30,
+        kernel_recommendation: str = "l2",
+    ) -> QualificationResult:
+        noise = self.measure_noise(alerts, kernel_recommendation)
         tau = self.sweep_tau(alerts, noise)
         remediations = self.generate_remediations(noise)
         cat_dist = self.compute_category_distribution(alerts)
         daily_vol = len(alerts) / max(days_in_sample, 1)
 
         sigma_after = self.estimate_post_remediation_sigma(noise, remediations)
-        after_class = self._classify(sigma_after)
+        after_class = self._classify(sigma_after, kernel_recommendation)
         would_reclassify = (
             after_class != noise.classification
             and noise.classification in ("AMBER", "RED")
         )
 
+        # noise_ratio: spread of per-factor noise
+        sigmas = list(noise.sigma_per_factor.values())
+        sigma_min = min(sigmas) if sigmas else 0.0
+        if sigmas and sigma_min > 0:
+            noise_ratio: Optional[float] = round(max(sigmas) / sigma_min, 3)
+        else:
+            noise_ratio = None
+
+        if noise_ratio is not None:
+            if noise_ratio > 1.5:
+                rationale = (
+                    f"noise_ratio {noise_ratio:.1f} > 1.5 threshold "
+                    f"\u2192 DiagonalKernel recommended"
+                )
+            else:
+                rationale = (
+                    f"noise_ratio {noise_ratio:.1f} \u2264 1.5 \u2192 L2 kernel sufficient"
+                )
+        else:
+            rationale = "kernel_recommendation provided externally"
+
         summary = self._generate_summary(
             noise, tau, remediations, sigma_after, would_reclassify,
-            daily_vol, len(alerts),
+            daily_vol, len(alerts), kernel_recommendation,
         )
 
         return QualificationResult(
@@ -145,9 +189,14 @@ class DeploymentQualifier:
             category_distribution=cat_dist,
             estimated_daily_volume=daily_vol,
             summary=summary,
+            kernel_recommendation=kernel_recommendation,
+            noise_ratio=noise_ratio,
+            rationale=rationale,
         )
 
-    def measure_noise(self, alerts: List[Dict]) -> NoiseProfile:
+    def measure_noise(
+        self, alerts: List[Dict], kernel_recommendation: str = "l2"
+    ) -> NoiseProfile:
         """σ per factor = std dev of that factor across alerts. σ_mean = mean of those."""
         if not alerts:
             return NoiseProfile(0.0, {f: 0.30 for f in FACTOR_NAMES}, "RED", False)
@@ -170,7 +219,7 @@ class DeploymentQualifier:
             sigma_per_factor[f] = float(np.std(vals)) if len(vals) >= 2 else 0.30
 
         sigma_mean = float(np.mean(list(sigma_per_factor.values())))
-        classification = self._classify(sigma_mean)
+        classification = self._classify(sigma_mean, kernel_recommendation)
         return NoiseProfile(
             sigma_mean=sigma_mean,
             sigma_per_factor=sigma_per_factor,
@@ -245,10 +294,11 @@ class DeploymentQualifier:
 
     # ── internal ──────────────────────────────────────────────────────────────
 
-    def _classify(self, sigma: float) -> str:
-        if sigma <= SIGMA_GREEN:
+    def _classify(self, sigma: float, kernel: str = "l2") -> str:
+        green, amber = _THRESHOLDS.get(kernel, _THRESHOLDS["l2"])
+        if sigma <= green:
             return "GREEN"
-        elif sigma <= SIGMA_AMBER:
+        elif sigma <= amber:
             return "AMBER"
         return "RED"
 
@@ -256,6 +306,7 @@ class DeploymentQualifier:
         self, noise: NoiseProfile, tau: TauCalibration,
         remediations: List[RemediationItem], sigma_after: float,
         would_reclassify: bool, daily_vol: float, n_alerts: int,
+        kernel: str = "l2",
     ) -> str:
         s = (
             f"Analyzed {n_alerts} alerts ({daily_vol:.0f}/day). "
@@ -286,7 +337,7 @@ class DeploymentQualifier:
             if would_reclassify:
                 s += (
                     f"After remediation: σ→{sigma_after:.3f} "
-                    f"({self._classify(sigma_after)}). "
+                    f"({self._classify(sigma_after, kernel)}). "
                     f"Connect recommended sources to enable learning."
                 )
         return s
