@@ -3,6 +3,7 @@ import pytest
 
 from ci_platform.onboarding.deployment_qualification import (
     FACTOR_NAMES, SIGMA_GREEN, SIGMA_AMBER, DeploymentQualifier,
+    sweep_tau_for_deployment,
 )
 
 
@@ -173,3 +174,68 @@ def test_l2_kernel_thresholds_unchanged():
     )
     assert result.kernel_recommendation == "l2"
     assert result.noise_ratio is not None
+
+
+# ── TD-034 v2: Per-deployment τ sweep (Phase 3) ───────────────────────────────
+
+def _make_shadow_decisions(n: int, confidence: float, correct: bool):
+    return [{"confidence": confidence, "correct": correct} for _ in range(n)]
+
+
+def test_tau_sweep_selects_best_tau():
+    rng = np.random.default_rng(1)
+    decisions = [
+        {"confidence": float(rng.uniform(0.5, 0.9)), "correct": bool(rng.random() > 0.3)}
+        for _ in range(50)
+    ]
+    result = sweep_tau_for_deployment(decisions)
+    assert result["tau_selected"] in [0.08, 0.10, 0.12, 0.15, 0.18]
+    assert len(result["sweep_results"]) == 5
+
+
+def test_tau_sweep_gate_pass_when_ece_below_threshold():
+    # confidence=0.5, 50% correct → ECE=0 for any tau (sigmoid(0/tau)=0.5)
+    rng = np.random.default_rng(7)
+    decisions = [
+        {"confidence": 0.5, "correct": bool(i % 2 == 0)}
+        for i in range(50)
+    ]
+    result = sweep_tau_for_deployment(decisions)
+    assert result["gate_pass"] is True
+    assert result["recommendation"] == "use_selected"
+
+
+def test_tau_sweep_gate_fail_uses_lowest_ece():
+    # confidence=0.99, all wrong → severe miscalibration across all tau values
+    decisions = _make_shadow_decisions(50, confidence=0.99, correct=False)
+    result = sweep_tau_for_deployment(decisions)
+    assert result["gate_pass"] is False
+    assert result["recommendation"] == "use_default_010"
+    # tau_selected should have the minimum ECE in sweep_results (ties resolved by function)
+    sweep = result["sweep_results"]
+    selected_ece = sweep[str(result["tau_selected"])]
+    for v in sweep.values():
+        assert selected_ece <= v
+
+
+def test_tau_sweep_not_triggered_for_centroidal():
+    # noise_level=0.09 → sigma_mean ≈ 0.09 (≤ 0.12), uniform factors → noise_ratio ≈ 1.0 (≤ 2.0)
+    qualifier = DeploymentQualifier()
+    alerts = _make_alerts(200, 0.09)
+    result = qualifier.qualify(alerts)
+    assert result.tau_sweep["tau_sweep_triggered"] is False
+    assert result.tau_sweep["tau_selected"] == 0.10
+
+
+def test_tau_sweep_triggered_for_high_noise():
+    # noise_level=0.18 → sigma_mean ≈ 0.18 (> 0.12 threshold)
+    qualifier = DeploymentQualifier()
+    alerts = _make_alerts(200, 0.18)
+    rng = np.random.default_rng(3)
+    shadow = [
+        {"confidence": float(rng.uniform(0.4, 0.95)), "correct": bool(rng.random() > 0.4)}
+        for _ in range(50)
+    ]
+    result = qualifier.qualify(alerts, shadow_decisions=shadow)
+    assert result.tau_sweep["tau_sweep_triggered"] is True
+    assert len(result.tau_sweep["sweep_results"]) > 0

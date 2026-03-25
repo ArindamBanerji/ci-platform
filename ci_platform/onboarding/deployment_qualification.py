@@ -78,8 +78,12 @@ REMEDIATION_MAP = {
     },
 }
 
-# τ sweep values
+# τ sweep values (existing mini sweep in sweep_tau method)
 TAU_VALUES = [0.05, 0.08, 0.10, 0.12, 0.15]
+
+# τ sweep values for per-deployment Phase 3 calibration (TD-034 v2)
+TAU_SWEEP_VALUES = [0.08, 0.10, 0.12, 0.15, 0.18]
+ECE_GATE = 0.05
 
 
 @dataclass
@@ -109,6 +113,87 @@ class RemediationItem:
     priority: int                 # 1=highest impact
 
 
+def _compute_ece(
+    decisions: List[Dict],
+    tau: float,
+    n_bins: int,
+) -> float:
+    """
+    Compute Expected Calibration Error for a given tau.
+    Rescales confidence scores using softmax temperature tau.
+    ECE = mean(|mean_confidence_in_bin - fraction_correct_in_bin|)
+    """
+    import math
+    rescaled = []
+    for d in decisions:
+        conf = max(min(d["confidence"], 0.9999), 0.0001)
+        logit = math.log(conf / (1 - conf))
+        conf_tau = 1 / (1 + math.exp(-logit / tau))
+        rescaled.append((conf_tau, d["correct"]))
+
+    bins: List[List] = [[] for _ in range(n_bins)]
+    for conf, correct in rescaled:
+        bin_idx = min(int(conf * n_bins), n_bins - 1)
+        bins[bin_idx].append((conf, correct))
+
+    ece = 0.0
+    for bin_items in bins:
+        if not bin_items:
+            continue
+        mean_conf = sum(c for c, _ in bin_items) / len(bin_items)
+        mean_acc = sum(int(ok) for _, ok in bin_items) / len(bin_items)
+        ece += abs(mean_conf - mean_acc) * len(bin_items) / len(rescaled)
+    return ece
+
+
+def sweep_tau_for_deployment(
+    shadow_decisions: List[Dict],
+    tau_values: Optional[List[float]] = None,
+    ece_gate: float = ECE_GATE,
+    n_bins: int = 10,
+) -> Dict:
+    """
+    Per-deployment τ calibration from first 50 shadow decisions.
+
+    Called when: sigma_mean > 0.12 OR noise_ratio > 2.0
+
+    Args:
+        shadow_decisions: list of dicts with keys {confidence: float, correct: bool}
+        tau_values: sweep values (default TAU_SWEEP_VALUES)
+        ece_gate: target ECE threshold (default 0.05)
+        n_bins: calibration bins (default 10)
+
+    Returns:
+        {tau_selected, ece_at_selected, gate_pass, sweep_results, recommendation}
+    """
+    if tau_values is None:
+        tau_values = TAU_SWEEP_VALUES
+
+    sweep_results: Dict[float, float] = {}
+    for tau in tau_values:
+        ece = _compute_ece(shadow_decisions, tau, n_bins)
+        sweep_results[tau] = ece
+
+    passing = {t: e for t, e in sweep_results.items() if e <= ece_gate}
+
+    if passing:
+        tau_selected = min(passing, key=passing.get)
+        ece_selected = passing[tau_selected]
+        gate_pass = True
+    else:
+        tau_selected = min(sweep_results, key=sweep_results.get)
+        ece_selected = sweep_results[tau_selected]
+        gate_pass = False
+
+    return {
+        "tau_selected": tau_selected,
+        "ece_at_selected": round(ece_selected, 4),
+        "gate_pass": gate_pass,
+        "sweep_results": {str(t): round(e, 4) for t, e in sweep_results.items()},
+        "recommendation": "use_selected" if gate_pass else "use_default_010",
+    }
+
+
 @dataclass
 class QualificationResult:
     noise: NoiseProfile
@@ -123,6 +208,7 @@ class QualificationResult:
     kernel_recommendation: str = "l2"      # "l2" or "diagonal"
     noise_ratio: Optional[float] = None    # max(σ) / min(σ) across factors
     rationale: str = ""                    # why this kernel was chosen
+    tau_sweep: Optional[Dict] = None       # Phase 3 per-deployment τ sweep result (TD-034 v2)
 
 
 class DeploymentQualifier:
@@ -139,6 +225,7 @@ class DeploymentQualifier:
         alerts: List[Dict],
         days_in_sample: int = 30,
         kernel_recommendation: str = "l2",
+        shadow_decisions: Optional[List[Dict]] = None,
     ) -> QualificationResult:
         noise = self.measure_noise(alerts, kernel_recommendation)
         tau = self.sweep_tau(alerts, noise)
@@ -174,6 +261,24 @@ class DeploymentQualifier:
         else:
             rationale = "kernel_recommendation provided externally"
 
+        # Phase 3: per-deployment τ sweep (TD-034 v2)
+        tau_sweep_triggered = (
+            noise.sigma_mean > 0.12
+            or (noise_ratio is not None and noise_ratio > 2.0)
+        )
+        sd = shadow_decisions or []
+        if tau_sweep_triggered and len(sd) >= 50:
+            tau_result: Dict = sweep_tau_for_deployment(sd[:50])
+        else:
+            tau_result = {
+                "tau_selected": 0.10,
+                "ece_at_selected": None,
+                "gate_pass": True,
+                "sweep_results": {},
+                "recommendation": "use_default_010",
+            }
+        tau_result["tau_sweep_triggered"] = tau_sweep_triggered
+
         summary = self._generate_summary(
             noise, tau, remediations, sigma_after, would_reclassify,
             daily_vol, len(alerts), kernel_recommendation,
@@ -192,6 +297,7 @@ class DeploymentQualifier:
             kernel_recommendation=kernel_recommendation,
             noise_ratio=noise_ratio,
             rationale=rationale,
+            tau_sweep=tau_result,
         )
 
     def measure_noise(
