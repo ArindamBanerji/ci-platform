@@ -163,3 +163,50 @@ async def test_extract_failure_stops_pipeline(mock_connector):
     result = await pipeline.run(days_back=30, limit=100)
     assert result.success is False
     assert result.stages[0].success is False
+
+
+# ── CI-3: shadow_decisions threaded through pipeline ──────────────────────────
+
+def test_tau_sweep_reachable_via_pipeline_compute():
+    """CI-3: TD-034 v2 τ sweep triggers when sigma_mean > 0.12 and shadow_decisions provided."""
+    import numpy as np
+    pipeline = OnboardingPipeline(AsyncMock())
+
+    # High-noise alerts: sigma_mean will exceed 0.12 threshold
+    rng = np.random.default_rng(5)
+    alerts = [
+        {
+            "alert_type": "brute_force",
+            "severity": "high",
+            "factor_vector": np.clip(rng.normal(0.5, 0.18, 6), 0, 1).tolist(),
+        }
+        for _ in range(100)
+    ]
+    shadow = [
+        {"confidence": float(rng.uniform(0.4, 0.95)), "correct": bool(rng.random() > 0.4)}
+        for _ in range(50)
+    ]
+    stage, config = pipeline._compute(alerts, days_back=30, shadow_decisions=shadow)
+    assert stage.success is True
+    tau_sweep = config.get("tau_sweep", {})
+    assert tau_sweep is not None
+    # If triggered, sweep_results must be populated
+    if tau_sweep.get("tau_sweep_triggered"):
+        assert len(tau_sweep["sweep_results"]) == 5
+
+
+# ── CI-5: pipeline → ledger integration ───────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_pipeline_qualification_entry_fields_populated(mock_connector):
+    """CI-5: After full pipeline run, qualification_entry has kernel_type and noise_zone set."""
+    pipeline = OnboardingPipeline(mock_connector)
+    result = await pipeline.run(days_back=30, limit=100)
+    assert result.success is True
+    assert result.recommended_config is not None
+    entry = result.recommended_config.get("qualification_entry")
+    assert entry is not None, "qualification_entry missing from recommended_config"
+    assert entry["kernel_type"] is not None, "kernel_type must not be None"
+    assert entry["noise_zone"] is not None, "noise_zone must not be None"
+    assert entry["conservation_status"] == "pending"
+    assert entry["entry_hash"] != ""

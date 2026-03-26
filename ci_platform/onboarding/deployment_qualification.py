@@ -33,7 +33,7 @@ FACTOR_NAMES = [
 # Thresholds from 1D sweep — L2 kernel (default)
 SIGMA_GREEN = 0.105
 SIGMA_AMBER = 0.157
-SIGMA_RED   = 0.215
+SIGMA_RED_REFERENCE = 0.215  # unused — historical reference only; actual RED = σ > SIGMA_AMBER
 
 # Thresholds — DiagonalKernel (higher noise ceiling; validated by V-MV-KERNEL factorial)
 SIGMA_GREEN_DIAGONAL = 0.157
@@ -229,7 +229,7 @@ class DeploymentQualifier:
     ) -> QualificationResult:
         noise = self.measure_noise(alerts, kernel_recommendation)
         tau = self.sweep_tau(alerts, noise)
-        remediations = self.generate_remediations(noise)
+        remediations = self.generate_remediations(noise, kernel_recommendation)
         cat_dist = self.compute_category_distribution(alerts)
         daily_vol = len(alerts) / max(days_in_sample, 1)
 
@@ -358,12 +358,15 @@ class DeploymentQualifier:
             recalibrate=(best_tau != 0.10),
         )
 
-    def generate_remediations(self, noise: NoiseProfile) -> List[RemediationItem]:
-        """Prioritised remediation for factors above GREEN threshold."""
+    def generate_remediations(
+        self, noise: NoiseProfile, kernel_recommendation: str = "l2"
+    ) -> List[RemediationItem]:
+        """Prioritised remediation for factors above kernel-appropriate GREEN threshold."""
+        green_threshold = _THRESHOLDS.get(kernel_recommendation, _THRESHOLDS["l2"])[0]
         items: List[RemediationItem] = []
         for f in FACTOR_NAMES:
             current = noise.sigma_per_factor.get(f, 0.0)
-            if current <= SIGMA_GREEN:
+            if current <= green_threshold:
                 continue
             remap = REMEDIATION_MAP.get(f, {})
             reduction = remap.get("expected_reduction", 0.20)

@@ -96,6 +96,7 @@ class OnboardingPipeline:
         days_back: int = 30,
         limit: int = 10000,
         progress_callback: Optional[Callable] = None,
+        shadow_decisions: Optional[List[Dict]] = None,
     ) -> PipelineResult:
         stages: List[StageResult] = []
         pipeline_start = time.monotonic()
@@ -152,7 +153,9 @@ class OnboardingPipeline:
             return _failed_result(stages, pipeline_start)
 
         # ── Stage 6: Compute ──────────────────────────────────────────────────
-        stage, recommended = self._compute(redacted_alerts, days_back=days_back)
+        stage, recommended = self._compute(
+            redacted_alerts, days_back=days_back, shadow_decisions=shadow_decisions
+        )
         stages.append(stage)
         _progress("compute", 6 / 6)
 
@@ -396,14 +399,35 @@ class OnboardingPipeline:
         return stage, manifest
 
     def _compute(
-        self, alerts: List[Dict], days_back: int = 30
+        self,
+        alerts: List[Dict],
+        days_back: int = 30,
+        shadow_decisions: Optional[List[Dict]] = None,
     ) -> Tuple[StageResult, Dict]:
         t0 = time.monotonic()
 
         from ci_platform.onboarding.deployment_qualification import DeploymentQualifier
+        from ci_platform.audit.evidence_ledger import LedgerEntry
 
         qualifier = DeploymentQualifier()
-        qualification = qualifier.qualify(alerts, days_in_sample=days_back)
+
+        # CI-2: derive kernel_recommendation from a noise probe before full qualify()
+        noise_probe = qualifier.measure_noise(alerts)
+        sigmas = list(noise_probe.sigma_per_factor.values())
+        sigma_min = min(sigmas) if sigmas else 0.0
+        if sigmas and sigma_min > 0:
+            noise_ratio_probe = max(sigmas) / sigma_min
+            kernel_recommendation = "diagonal" if noise_ratio_probe > 1.5 else "l2"
+        else:
+            kernel_recommendation = "l2"
+
+        # CI-3: pass shadow_decisions so Phase 3 τ sweep is reachable
+        qualification = qualifier.qualify(
+            alerts,
+            days_in_sample=days_back,
+            kernel_recommendation=kernel_recommendation,
+            shadow_decisions=shadow_decisions,
+        )
 
         config = {
             "tau_initial": qualification.tau.tau_optimal,
@@ -428,6 +452,32 @@ class OnboardingPipeline:
                 for r in qualification.remediations
             ],
             "summary": qualification.summary,
+            # CI-4: surface Phase 3 τ calibration result
+            "tau_sweep": qualification.tau_sweep,
+        }
+
+        # CI-5: create a sealed LedgerEntry recording the epistemic state at qualification time
+        ledger_entry = LedgerEntry(
+            decision_id=f"P28-{uuid.uuid4().hex[:8]}",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            alert_id="P28-qualification",
+            factor_breakdown={k: round(v, 4) for k, v in qualification.noise.sigma_per_factor.items()},
+            action="qualify",
+            confidence=max(0.0, round(1.0 - qualification.noise.sigma_mean, 4)),
+            outcome="pending",
+            analyst_override=False,
+            centroid_state_hash=f"sigma:{qualification.noise.sigma_mean:.4f}",
+            prev_hash="0" * 64,
+            kernel_type=kernel_recommendation,
+            noise_zone=qualification.noise.classification.lower(),
+            conservation_status="pending",
+        ).seal()
+        config["qualification_entry"] = {
+            "decision_id": ledger_entry.decision_id,
+            "kernel_type": ledger_entry.kernel_type,
+            "noise_zone": ledger_entry.noise_zone,
+            "conservation_status": ledger_entry.conservation_status,
+            "entry_hash": ledger_entry.entry_hash,
         }
 
         dur = time.monotonic() - t0
