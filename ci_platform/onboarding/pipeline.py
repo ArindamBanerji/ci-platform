@@ -456,6 +456,33 @@ class OnboardingPipeline:
             "tau_sweep": qualification.tau_sweep,
         }
 
+        # Feature 5: Enrichment Advisor — P28 Phase 2 report
+        from ci_platform.enrichment.enrichment_advisor import EnrichmentAdvisor
+        advisor = EnrichmentAdvisor(
+            sigma_per_factor=qualification.noise.sigma_per_factor,
+            kernel=kernel_recommendation,
+        )
+        report = advisor.recommend()
+        config["enrichment_advisor"] = {
+            "top_opportunity": {
+                "factor": report.top_opportunity.factor,
+                "current_sigma": report.top_opportunity.sigma,
+                "expected_day1_lift_pp": report.top_opportunity.lift_pp,
+                "action": report.top_opportunity.action,
+            },
+            "ranked_factors": [
+                {
+                    "factor": fo.factor,
+                    "sigma": fo.sigma,
+                    "opportunity": fo.opportunity,
+                    "lift_pp": fo.lift_pp,
+                }
+                for fo in report.ranked_factors
+            ],
+            "kernel_note": report.kernel_note,
+            "methodology": report.methodology,
+        }
+
         # CI-5: create a sealed LedgerEntry recording the epistemic state at qualification time
         ledger_entry = LedgerEntry(
             decision_id=f"P28-{uuid.uuid4().hex[:8]}",
