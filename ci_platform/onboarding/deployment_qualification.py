@@ -401,6 +401,40 @@ class DeploymentQualifier:
         total = max(sum(counts.values()), 1)
         return {k: round(v / total, 3) for k, v in counts.items()}
 
+    def qualify_with_distance(
+        self,
+        distance_history: List[float],
+        current_mu: Optional[np.ndarray] = None,
+        canonical_mu: Optional[np.ndarray] = None,
+    ) -> Dict:
+        """
+        Add centroid distance health to the qualification report.
+        Call alongside existing sigma/kernel qualification.
+
+        If current_mu and canonical_mu are supplied, appends the freshly
+        computed distance to distance_history before trend analysis.
+        """
+        from ci_platform.onboarding.centroid_convergence import (
+            compute_centroid_distance,
+            interpret_distance_trend,
+        )
+
+        if current_mu is not None and canonical_mu is not None:
+            current_distance = compute_centroid_distance(current_mu, canonical_mu)
+            distance_history = list(distance_history) + [current_distance]
+
+        trend = interpret_distance_trend(distance_history)
+
+        return {
+            "centroid_distance_health": trend,
+            "centroid_distance_history_length": len(distance_history),
+            "exp_g1_field": "centroid_distance_to_canonical",
+            "exp_g1_note": (
+                "EXP-G1 primary metric. Decreases during convergence. "
+                "Alert if increases 50+ consecutive decisions."
+            ),
+        }
+
     # ── internal ──────────────────────────────────────────────────────────────
 
     def _classify(self, sigma: float, kernel: str = "l2") -> str:
