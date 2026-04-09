@@ -73,6 +73,24 @@ class AGEClient:
         self._dsn = dsn or DATABASE_URL
         self._graph = graph_name or GRAPH_NAME
 
+    # ── interface parity (Neo4jClient) ────────────────────────────────────────
+
+    async def connect(self) -> None:
+        """
+        No-op. AGEClient uses per-query connections.
+        Exists for interface parity with Neo4jClient so callers
+        need no hasattr() guards.
+        """
+        pass
+
+    async def close(self) -> None:
+        """
+        No-op. AGEClient uses per-query connections.
+        Exists for interface parity with Neo4jClient so callers
+        need no hasattr() guards.
+        """
+        pass
+
     # ── connection ────────────────────────────────────────────────────────────
 
     @asynccontextmanager
