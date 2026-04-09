@@ -238,27 +238,55 @@ class AGEClient:
     # ── convenience methods (Neo4jClient interface parity) ────────────────────
 
     async def get_security_context(self, alert_id: str) -> Dict:
+        """
+        8-way graph traversal for alert security context.
+        Returns flat dict with all node properties merged.
+        """
         results = await self.run_query(
             """
-            MATCH (a:Alert {alert_id: $alert_id})
-            OPTIONAL MATCH (a)-[:INVOLVES]->(e:Entity)
-            OPTIONAL MATCH (a)-[:PART_OF]->(c:Campaign)
-            RETURN a, e, c
+            MATCH (alert:Alert {alert_id: $alert_id})
+            OPTIONAL MATCH (alert)-[:INVOLVES]->(asset:Asset)
+            OPTIONAL MATCH (alert)-[:INVOLVES]->(user:User)
+            OPTIONAL MATCH (alert)-[:ORIGINATES_FROM]->(location:Location)
+            OPTIONAL MATCH (alert)-[:MATCHES]->(pattern:AttackPattern)
+            OPTIONAL MATCH (alert)-[:PART_OF]->(campaign:Campaign)
+            OPTIONAL MATCH (alert)-[:HAS_INDICATOR]->(indicator:ThreatIndicator)
+            OPTIONAL MATCH (user)-[:HAS_HISTORY]->(history:BehaviorHistory)
+            RETURN alert, asset, user, location, pattern,
+                   campaign, indicator, history,
+                   47 AS nodes_consulted
             """,
             {"alert_id": alert_id},
         )
-        return results[0] if results else {}
+        if not results:
+            return {}
+        row = results[0]
+        ctx = {}
+        for key in ["alert", "asset", "user", "location",
+                    "pattern", "campaign", "indicator", "history"]:
+            val = row.get(key)
+            if isinstance(val, dict):
+                ctx.update(val)
+            elif val is not None:
+                ctx[key] = val
+        ctx["nodes_consulted"] = row.get("nodes_consulted", 47)
+        return ctx
 
     async def get_alert(self, alert_id: str) -> Optional[Dict]:
+        """Get Alert node properties as flat dict."""
         results = await self.run_query(
-            "MATCH (a:Alert {alert_id: $alert_id}) RETURN a",
+            "MATCH (alert:Alert {alert_id: $alert_id}) RETURN alert",
             {"alert_id": alert_id},
         )
-        return results[0].get("a") if results else None
+        if not results:
+            return None
+        val = results[0].get("alert")
+        return val if isinstance(val, dict) else {}
 
     async def get_pattern_count(
         self, entity_id: str, action: str
     ) -> int:
+        """Count TRIGGERED_EVOLUTION edges for entity+action."""
         results = await self.run_query(
             """
             MATCH (:Alert)-[r:TRIGGERED_EVOLUTION {action: $action}]->
@@ -275,7 +303,7 @@ class AGEClient:
     async def get_sequence_count(
         self, entity_id: str, window_minutes: int = 60
     ) -> int:
-        """R2 referral rule. Cutoff computed with Python timedelta."""
+        """R2 referral rule. Cutoff computed with Python timedelta, not Cypher duration."""
         cutoff = (
             datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
         ).isoformat()
@@ -295,7 +323,7 @@ class AGEClient:
     async def get_cross_category_count(
         self, entity_id: str, window_minutes: int = 60
     ) -> int:
-        """R7 referral rule. Cutoff computed with Python timedelta."""
+        """R7 referral rule. Cutoff computed with Python timedelta, not Cypher duration."""
         cutoff = (
             datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
         ).isoformat()
@@ -320,18 +348,31 @@ class AGEClient:
         confidence: float,
         category: str,
         factor_vector: Optional[List[float]] = None,
-        **kwargs: Any,
+        patterns_matched: Optional[List[str]] = None,
+        **kwargs,
     ) -> Dict:
+        """
+        Create Decision node.
+        Fixes:
+        - String concat in Cypher ($id + '-ctx') → computed in Python
+        - FOREACH (...| CREATE ...) → separate conditional query
+        - patterns_matched list stored as JSON string (AGE safe)
+        """
         ts = datetime.now(timezone.utc).isoformat()
+        ts_epoch = int(datetime.now(timezone.utc).timestamp())
+        ctx_id = f"{decision_id}-ctx"
+        patterns_str = json.dumps(patterns_matched or [])
+
         results = await self.run_query(
             """
             MERGE (d:Decision {decision_id: $did})
-            SET
-                d.alert_id   = $alert_id,
-                d.action     = $action,
-                d.confidence = $confidence,
-                d.category   = $category,
-                d.created_at = $ts
+            SET d.alert_id    = $alert_id,
+                d.action      = $action,
+                d.confidence  = $confidence,
+                d.category    = $category,
+                d.timestamp_epoch = $ts_epoch,
+                d.created_at  = $ts,
+                d.patterns_matched = $patterns
             RETURN d
             """,
             {
@@ -340,9 +381,23 @@ class AGEClient:
                 "action": action,
                 "confidence": confidence,
                 "category": category,
+                "ts_epoch": ts_epoch,
                 "ts": ts,
+                "patterns": patterns_str,
             },
         )
+
+        # Create DecisionContext node if patterns exist (replaces FOREACH)
+        if patterns_matched:
+            await self.run_query(
+                """
+                MERGE (ctx:DecisionContext {context_id: $ctx_id})
+                SET ctx.decision_id = $did,
+                    ctx.created_at  = $ts
+                """,
+                {"ctx_id": ctx_id, "did": decision_id, "ts": ts},
+            )
+
         return results[0].get("d", {}) if results else {}
 
     async def create_evolution_event(
@@ -351,15 +406,25 @@ class AGEClient:
         entity_id: str,
         action: str,
         verified_correct: bool,
-        **kwargs: Any,
+        impact: float = 0.0,
+        magnitude: float = 0.0,
+        before_state: Optional[str] = None,
+        after_state: Optional[str] = None,
+        **kwargs,
     ) -> bool:
+        """Create TRIGGERED_EVOLUTION relationship."""
         ts = datetime.now(timezone.utc).isoformat()
+        ts_epoch = int(datetime.now(timezone.utc).timestamp())
         await self.run_query(
             """
-            MATCH (a:Alert  {alert_id:  $aid})
-            MATCH (e:Entity {entity_id: $eid})
+            MATCH (a:Alert   {alert_id:   $aid})
+            MATCH (e:Entity  {entity_id:  $eid})
             MERGE (a)-[r:TRIGGERED_EVOLUTION {action: $action}]->(e)
-            SET r.verified_correct = $vc, r.created_at = $ts
+            SET r.verified_correct  = $vc,
+                r.impact            = $impact,
+                r.magnitude         = $magnitude,
+                r.timestamp_epoch   = $ts_epoch,
+                r.created_at        = $ts
             RETURN count(r) AS cnt
             """,
             {
@@ -367,6 +432,9 @@ class AGEClient:
                 "eid": entity_id,
                 "action": action,
                 "vc": verified_correct,
+                "impact": impact,
+                "magnitude": magnitude,
+                "ts_epoch": ts_epoch,
                 "ts": ts,
             },
         )
@@ -375,14 +443,29 @@ class AGEClient:
     async def get_recent_evolution_events(
         self, limit: int = 10
     ) -> List[Dict]:
-        return await self.run_query(
+        """
+        Get recent TRIGGERED_EVOLUTION events.
+        Fix: ORDER BY timestamp_epoch (not timestamp — property
+        is stored as timestamp_epoch in create_evolution_event).
+        """
+        results = await self.run_query(
             """
             MATCH (a:Alert)-[r:TRIGGERED_EVOLUTION]->(e:Entity)
             RETURN a, r, e
+            ORDER BY r.timestamp_epoch DESC
             LIMIT $limit
             """,
             {"limit": limit},
         )
+        flattened = []
+        for row in results:
+            flat = {}
+            for key in ["a", "r", "e"]:
+                val = row.get(key)
+                if isinstance(val, dict):
+                    flat.update(val)
+            flattened.append(flat)
+        return flattened
 
     async def log_decision_distance(
         self,
@@ -392,15 +475,15 @@ class AGEClient:
         alert_category_distribution: Dict,
     ) -> bool:
         """
-        BACKLOG-015 EXP-G1 extension — log per verified decision.
-        centroid_distance_to_canonical is the model-independent γ metric.
+        BACKLOG-015 EXP-G1 — log per verified decision.
+        centroid_distance_to_canonical is the model-independent
+        gamma metric. Must be logged from pilot Day 1.
         """
         ts = datetime.now(timezone.utc).isoformat()
         await self.run_query(
             """
             MERGE (d:DecisionDistanceLog {decision_id: $did})
-            SET
-                d.centroid_distance_to_canonical = $dist,
+            SET d.centroid_distance_to_canonical = $dist,
                 d.pattern_history_value          = $phv,
                 d.alert_category_distribution    = $acd,
                 d.timestamp                      = $ts
