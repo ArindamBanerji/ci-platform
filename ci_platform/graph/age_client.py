@@ -358,6 +358,55 @@ class AGEClient:
         except (TypeError, ValueError):
             return 0
 
+    async def count_verified_decisions(self) -> int:
+        """Count all verified Decision nodes."""
+        results = await self.run_query(
+            "MATCH (d:Decision {verified: 'true'}) RETURN count(d) AS cnt"
+        )
+        try:
+            return int(results[0]["cnt"]) if results else 0
+        except (TypeError, ValueError, KeyError):
+            return 0
+
+    async def count_decisions_by_category(self) -> dict:
+        """Returns {category: count} for all verified decisions."""
+        results = await self.run_query(
+            """
+            MATCH (d:Decision {verified: 'true'})
+            RETURN d.category AS category, count(d) AS cnt
+            """
+        )
+        return {
+            r["category"]: int(r["cnt"])
+            for r in results
+            if r.get("category")
+        }
+
+    async def compute_outcome_stats(self) -> dict:
+        """Returns override_rate and override_quality from Decision nodes."""
+        results = await self.run_query(
+            """
+            MATCH (d:Decision {verified: 'true'})
+            RETURN
+                count(d) AS total,
+                sum(CASE WHEN d.was_override = 'true' THEN 1 ELSE 0 END)
+                    AS overrides,
+                avg(CASE WHEN d.was_override = 'true'
+                    THEN d.quality_signal ELSE null END)
+                    AS avg_quality
+            """
+        )
+        if not results:
+            return {"override_rate": 0.0, "override_quality": 0.0}
+        row = results[0]
+        total = int(row.get("total") or 0)
+        overrides = int(row.get("overrides") or 0)
+        avg_q = float(row.get("avg_quality") or 0.0)
+        return {
+            "override_rate": overrides / total if total > 0 else 0.0,
+            "override_quality": avg_q,
+        }
+
     async def create_decision_trace(
         self,
         decision_id: str,
