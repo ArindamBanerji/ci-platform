@@ -359,53 +359,101 @@ class AGEClient:
             return 0
 
     async def count_verified_decisions(self) -> int:
-        """Count all verified Decision nodes."""
-        results = await self.run_query(
-            "MATCH (d:Decision {verified: 'true'}) RETURN count(d) AS cnt"
-        )
+        """
+        Count all Decision nodes.
+
+        AGE migration context: Decision nodes are migrated from Aura and represent
+        historically validated decisions (bootstrap + ingest). They have no 'verified'
+        field (that was a string sentinel that never existed in Aura) and no 'outcome'
+        field (set only by live triage feedback). All migrated Decision nodes count
+        as verified by definition in this schema.
+
+        Neo4jClient uses WHERE d.outcome IS NOT NULL — bootstrap decisions also lack
+        'outcome', so that predicate also returns 0 in a fresh demo. AGEClient counts
+        ALL Decision nodes so GraphSnapshot.verified_decisions reflects graph size.
+        """
         try:
+            results = await self.run_query(
+                "MATCH (d:Decision) RETURN count(d) AS cnt"
+            )
             return int(results[0]["cnt"]) if results else 0
         except (TypeError, ValueError, KeyError):
             return 0
 
     async def count_decisions_by_category(self) -> dict:
-        """Returns {category: count} for all verified decisions."""
-        results = await self.run_query(
-            """
-            MATCH (d:Decision {verified: 'true'})
-            RETURN d.category AS category, count(d) AS cnt
-            """
-        )
-        return {
-            r["category"]: int(r["cnt"])
-            for r in results
-            if r.get("category")
-        }
+        """
+        Returns {category: count} for all Decision nodes grouped by category.
+
+        Counts all Decision nodes (not just those with 'outcome') — consistent
+        with count_verified_decisions() above. Bootstrap decisions carry a
+        'category' field from migration.
+        """
+        try:
+            results = await self.run_query(
+                """
+                MATCH (d:Decision)
+                WHERE d.category IS NOT NULL
+                RETURN d.category AS category, count(d) AS cnt
+                """
+            )
+            return {
+                r["category"]: int(r["cnt"])
+                for r in results
+                if r.get("category")
+            }
+        except Exception:
+            return {}
 
     async def compute_outcome_stats(self) -> dict:
-        """Returns override_rate and override_quality from Decision nodes."""
-        results = await self.run_query(
-            """
-            MATCH (d:Decision {verified: 'true'})
-            RETURN
-                count(d) AS total,
-                sum(CASE WHEN d.was_override = 'true' THEN 1 ELSE 0 END)
-                    AS overrides,
-                avg(CASE WHEN d.was_override = 'true'
-                    THEN d.quality_signal ELSE null END)
-                    AS avg_quality
-            """
-        )
-        if not results:
+        """
+        Returns override_rate and override_quality from Decision nodes.
+
+        Counts ALL decisions as total (same basis as count_verified_decisions).
+        was_override and quality_signal are present only on live triage decisions
+        (not bootstrap). CASE guards handle nulls — bootstrap decisions contribute
+        0 overrides and null quality, so override_rate starts at 0.0 for a fresh
+        demo and rises as live decisions are recorded.
+
+        Note: boolean comparison uses = true (not = 'true') — AGE stores booleans
+        natively, not as strings.
+        """
+        try:
+            results = await self.run_query(
+                """
+                MATCH (d:Decision)
+                RETURN
+                    count(d) AS total,
+                    sum(CASE WHEN d.was_override = true THEN 1 ELSE 0 END)
+                        AS overrides,
+                    avg(CASE WHEN d.was_override = true
+                        THEN d.quality_signal ELSE null END)
+                        AS avg_quality
+                """
+            )
+            if not results:
+                return {"override_rate": 0.0, "override_quality": 0.0}
+            row = results[0]
+            total = int(row.get("total") or 0)
+            overrides = int(row.get("overrides") or 0)
+            avg_q = float(row.get("avg_quality") or 0.0)
+            return {
+                "override_rate": overrides / total if total > 0 else 0.0,
+                "override_quality": avg_q,
+            }
+        except Exception:
             return {"override_rate": 0.0, "override_quality": 0.0}
-        row = results[0]
-        total = int(row.get("total") or 0)
-        overrides = int(row.get("overrides") or 0)
-        avg_q = float(row.get("avg_quality") or 0.0)
-        return {
-            "override_rate": overrides / total if total > 0 else 0.0,
-            "override_quality": avg_q,
-        }
+
+    async def compute_iks(self) -> float:
+        """
+        IKS is computed by the domain copilot IKS service, not
+        stored in the graph. AGEClient returns 0.0 as sentinel —
+        the actual IKS is written to GraphSnapshot via
+        on_iks_recalculated() after the first triage decision.
+
+        This method exists for interface parity with Neo4jClient.
+        GAE P12: AGEClient cannot import from domain copilot repos.
+        """
+        return 0.0
 
     async def create_decision_trace(
         self,
