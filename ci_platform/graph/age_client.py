@@ -156,7 +156,11 @@ class AGEClient:
     def _extract_columns(self, cypher: str) -> List[str]:
         """
         Extract column names from the RETURN clause.
-        Handles: RETURN n, RETURN n AS node, RETURN count(n) AS cnt
+        Handles: RETURN n, RETURN n AS node, RETURN count(n) AS cnt,
+                 RETURN collect({k: v, ...}) AS alias  (nested braces).
+
+        Uses a bracket-aware split so commas inside {}, [], () are not
+        treated as column separators.
         """
         m = re.search(
             r'RETURN\s+(.+?)(?:\s+LIMIT\s|\s+ORDER\s|\s+SKIP\s|$)',
@@ -166,8 +170,28 @@ class AGEClient:
         if not m:
             return ["result"]
 
+        # Bracket-aware split on top-level commas only.
+        return_clause = m.group(1)
+        parts: List[str] = []
+        depth = 0
+        current: List[str] = []
+        for ch in return_clause:
+            if ch in "({[":
+                depth += 1
+                current.append(ch)
+            elif ch in ")}]":
+                depth -= 1
+                current.append(ch)
+            elif ch == "," and depth == 0:
+                parts.append("".join(current).strip())
+                current = []
+            else:
+                current.append(ch)
+        if current:
+            parts.append("".join(current).strip())
+
         cols: List[str] = []
-        for part in m.group(1).split(","):
+        for part in parts:
             part = part.strip()
             if re.search(r'\s+AS\s+', part, re.IGNORECASE):
                 alias = re.split(r'\s+AS\s+', part, flags=re.IGNORECASE)[-1].strip()
