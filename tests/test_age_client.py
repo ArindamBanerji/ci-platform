@@ -100,3 +100,126 @@ def test_run_query_no_datetime_in_cypher():
     assert len(cypher_datetime_calls) == 0, (
         f"Found {len(cypher_datetime_calls)} Cypher datetime() call(s) — must be 0"
     )
+
+
+# ── Integration tests (require AGE_INTEGRATION=1 + live DB) ──────────────────
+
+INTEGRATION_SKIP = pytest.mark.skipif(
+    os.getenv("AGE_INTEGRATION", "0") != "1",
+    reason="AGE_INTEGRATION != 1 — skipping live DB tests"
+)
+
+
+def run_async(coro):
+    import asyncio
+    if hasattr(asyncio, 'WindowsSelectorEventLoopPolicy'):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    return asyncio.get_event_loop().run_until_complete(coro)
+
+
+@INTEGRATION_SKIP
+def test_age_graph_queryable():
+    from ci_platform.graph.age_client import AGEClient
+    client = AGEClient()
+    run_async(client.ensure_graph())
+    results = run_async(client.run_query(
+        "MATCH (n) RETURN count(n) AS cnt"
+    ))
+    assert results is not None
+    assert isinstance(results[0].get("cnt", 0), int)
+
+
+@INTEGRATION_SKIP
+def test_age_entity_node_merge_idempotent():
+    from ci_platform.graph.age_client import AGEClient
+    client = AGEClient()
+    for _ in range(3):
+        run_async(client.run_query(
+            "MERGE (e:Entity {entity_id: $eid}) RETURN e",
+            parameters={"eid": "TEST-AGE-ENT-001"}
+        ))
+    results = run_async(client.run_query(
+        "MATCH (e:Entity {entity_id: $eid}) RETURN count(e) AS cnt",
+        parameters={"eid": "TEST-AGE-ENT-001"}
+    ))
+    assert int(results[0]["cnt"]) == 1
+
+
+@INTEGRATION_SKIP
+def test_age_triggered_evolution_traversal():
+    from ci_platform.graph.age_client import AGEClient
+    client = AGEClient()
+    run_async(client.run_query(
+        "MERGE (a:Alert {alert_id: $aid}) RETURN a",
+        parameters={"aid": "TEST-AGE-ALT-001"}
+    ))
+    run_async(client.run_query(
+        "MERGE (e:Entity {entity_id: $eid}) RETURN e",
+        parameters={"eid": "TEST-AGE-ENT-TEV"}
+    ))
+    run_async(client.create_evolution_event(
+        "TEST-AGE-ALT-001", "TEST-AGE-ENT-TEV", "escalate", True
+    ))
+    results = run_async(client.run_query(
+        """MATCH (a:Alert {alert_id: $aid})-[r:TRIGGERED_EVOLUTION]->(e:Entity)
+           RETURN count(r) AS cnt""",
+        parameters={"aid": "TEST-AGE-ALT-001"}
+    ))
+    assert int(results[0]["cnt"]) >= 1
+
+
+@INTEGRATION_SKIP
+def test_age_campaign_entity():
+    from ci_platform.graph.age_client import AGEClient
+    client = AGEClient()
+    run_async(client.run_query(
+        "MERGE (c:Campaign {campaign_id: $cid}) RETURN c",
+        parameters={"cid": "TEST-CAMP-001"}
+    ))
+    run_async(client.run_query(
+        "MERGE (a:Alert {alert_id: $aid}) RETURN a",
+        parameters={"aid": "TEST-ALT-CAMP-001"}
+    ))
+    run_async(client.create_evolution_event(
+        "TEST-ALT-CAMP-001", "TEST-CAMP-001", "investigate", True
+    ))
+    results = run_async(client.run_query(
+        "MATCH (c:Campaign {campaign_id: $cid}) RETURN c",
+        parameters={"cid": "TEST-CAMP-001"}
+    ))
+    assert len(results) >= 1
+
+
+@INTEGRATION_SKIP
+def test_backlog015_decision_distance_log():
+    import json
+    from ci_platform.graph.age_client import AGEClient
+    client = AGEClient()
+    run_async(client.log_decision_distance(
+        decision_id="TEST-B015-001",
+        centroid_distance_to_canonical=2.847,
+        pattern_history_value=0.423,
+        alert_category_distribution={"credential_access": 0.35, "lateral_movement": 0.25},
+    ))
+    results = run_async(client.run_query(
+        "MATCH (d:DecisionDistanceLog {decision_id: $did}) RETURN d",
+        parameters={"did": "TEST-B015-001"}
+    ))
+    assert len(results) == 1
+    assert float(results[0]["d"]["centroid_distance_to_canonical"]) == pytest.approx(2.847)
+
+
+@INTEGRATION_SKIP
+def test_age_merge_idempotent():
+    from ci_platform.graph.age_client import AGEClient
+    client = AGEClient()
+    for _ in range(3):
+        run_async(client.run_query(
+            "MERGE (t:ThreatIndicator {value: $val}) RETURN t",
+            parameters={"val": "192.168.1.1"}
+        ))
+    results = run_async(client.run_query(
+        "MATCH (t:ThreatIndicator {value: $val}) RETURN count(t) AS cnt",
+        parameters={"val": "192.168.1.1"}
+    ))
+    assert int(results[0]["cnt"]) == 1

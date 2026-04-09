@@ -10,7 +10,7 @@ Key AGE dialect differences from Neo4j:
   - Parameters: $name in Cypher body, passed as dict → converted to %s positional
   - Cypher datetime/duration functions NOT supported → use Python datetime/timedelta
   - Return values are agtype (JSONB) → parse with json.loads()
-  - MERGE ON CREATE SET → works same as Neo4j
+  - ON CREATE SET NOT supported on relationships → use SET (idempotent for timestamps)
 
 Environment variables:
   DATABASE_URL    = postgresql://user:pass@host:5432/dbname
@@ -119,7 +119,11 @@ class AGEClient:
         if isinstance(val, (int, float, bool)):
             return val
         try:
-            parsed = json.loads(str(val))
+            s = str(val).strip()
+            # AGE agtype values carry type annotations (e.g. ::vertex, ::edge,
+            # ::integer, ::float).  Strip before JSON-parsing.
+            s = re.sub(r"::\w+$", "", s)
+            parsed = json.loads(s)
             if isinstance(parsed, dict) and "properties" in parsed:
                 props = parsed["properties"]
                 if "id" in parsed:
@@ -166,6 +170,24 @@ class AGEClient:
 
     # ── core query execution ──────────────────────────────────────────────────
 
+    def _format_value(self, val: Any) -> str:
+        """
+        Format a Python value for direct interpolation into AGE Cypher.
+        AGE does not support $1 positional params inside $$ blocks.
+        All values must be inlined as Cypher literals.
+        """
+        if val is None:
+            return "null"
+        if isinstance(val, bool):
+            return "true" if val else "false"
+        if isinstance(val, int):
+            return str(val)
+        if isinstance(val, float):
+            return str(val)
+        # String: escape single quotes, wrap in single quotes
+        escaped = str(val).replace("'", "\\'")
+        return f"'{escaped}'"
+
     async def run_query(
         self,
         query: str,
@@ -175,35 +197,27 @@ class AGEClient:
         Execute a Cypher query against AGE.
         Returns List[Dict] — same shape as Neo4jClient.run_query().
 
-        Parameter substitution:
-          Write Cypher with $param_name placeholders.
-          Pass parameters={"param_name": value}.
-          Converts $name → %s positional for psycopg.
-
-        Timestamp handling:
-          Compute timestamps in Python, pass as ISO string parameter.
-          AGE does not support the Cypher datetime/duration functions.
+        IMPORTANT — AGE parameter handling:
+        AGE does NOT support $1 positional parameters inside $$ blocks.
+        Parameters are interpolated directly into the Cypher string.
+        Write Cypher with $param_name placeholders.
+        Pass parameters={"param_name": value}.
+        Values are safely formatted by type before interpolation.
         """
         if not query.strip():
             return []
 
+        # Substitute $name → formatted literal directly in Cypher
+        if parameters:
+            for name, val in parameters.items():
+                query = query.replace(f"${name}", self._format_value(val))
+
         columns = self._extract_columns(query)
         sql = self._build_sql(query, columns)
 
-        # Convert $name → %s and collect ordered param values
-        positional: List[Any] = []
-        if parameters:
-            def _sub(m: re.Match) -> str:
-                positional.append(parameters.get(m.group(1)))
-                return "%s"
-            sql = re.sub(r'\$(\w+)', _sub, sql)
-
         async with self._conn() as conn:
             try:
-                cur = await conn.execute(
-                    sql,
-                    positional if positional else None,
-                )
+                cur = await conn.execute(sql)
                 rows = await cur.fetchall()
                 results: List[Dict[str, Any]] = []
                 for row in rows:
@@ -215,8 +229,9 @@ class AGEClient:
                 return results
             except Exception as e:
                 logger.error(
-                    "AGE query error: %s\nQuery: %.300s\nParams: %s",
-                    e, query, parameters,
+                    f"AGE query error: {e}\n"
+                    f"Query: {query[:300]}\n"
+                    f"Params: {parameters}"
                 )
                 raise
 
@@ -311,7 +326,7 @@ class AGEClient:
         results = await self.run_query(
             """
             MERGE (d:Decision {decision_id: $did})
-            ON CREATE SET
+            SET
                 d.alert_id   = $alert_id,
                 d.action     = $action,
                 d.confidence = $confidence,
@@ -344,7 +359,7 @@ class AGEClient:
             MATCH (a:Alert  {alert_id:  $aid})
             MATCH (e:Entity {entity_id: $eid})
             MERGE (a)-[r:TRIGGERED_EVOLUTION {action: $action}]->(e)
-            ON CREATE SET r.verified_correct = $vc, r.created_at = $ts
+            SET r.verified_correct = $vc, r.created_at = $ts
             RETURN count(r) AS cnt
             """,
             {
@@ -384,7 +399,7 @@ class AGEClient:
         await self.run_query(
             """
             MERGE (d:DecisionDistanceLog {decision_id: $did})
-            ON CREATE SET
+            SET
                 d.centroid_distance_to_canonical = $dist,
                 d.pattern_history_value          = $phv,
                 d.alert_category_distribution    = $acd,

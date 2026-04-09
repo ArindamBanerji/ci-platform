@@ -17,3 +17,7 @@ include = ["ci_platform*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+env = [
+    "DATABASE_URL=postgresql://postgres:postgres@localhost:5433/soc_copilot",
+    "AGE_GRAPH_NAME=soc_graph",
+]
