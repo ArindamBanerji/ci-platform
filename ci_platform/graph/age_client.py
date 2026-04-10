@@ -478,7 +478,7 @@ class AGEClient:
         alert_id: str,
         action: str,
         confidence: float,
-        category: str,
+        category: str = "unknown",
         factor_vector: Optional[List[float]] = None,
         patterns_matched: Optional[List[str]] = None,
         **kwargs,
