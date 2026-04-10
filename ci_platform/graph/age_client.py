@@ -12,6 +12,11 @@ Key AGE dialect differences from Neo4j:
   - Return values are agtype (JSONB) → parse with json.loads()
   - ON CREATE SET NOT supported on relationships → use SET (idempotent for timestamps)
 
+Connection model:
+  - Sync psycopg.connect() per query, executed in asyncio.to_thread()
+  - No persistent connection — no event-loop coupling
+  - All public methods are async (interface parity with Neo4jClient)
+
 Environment variables:
   DATABASE_URL    = postgresql://user:pass@host:5432/dbname
   AGE_GRAPH_NAME  = soc_graph (default)
@@ -20,13 +25,15 @@ Environment variables:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+
+import psycopg  # sync only — no AsyncConnection anywhere
 
 logger = logging.getLogger(__name__)
 
@@ -36,33 +43,19 @@ DATABASE_URL = os.getenv(
     "postgresql://localhost:5432/soc_copilot",
 )
 
-# Lazy import — psycopg only required when AGE backend is active
-_psycopg = None
-
-
-def _load_psycopg():
-    global _psycopg
-    if _psycopg is None:
-        try:
-            import psycopg  # noqa: F401
-            _psycopg = psycopg
-        except ImportError:
-            raise ImportError(
-                "psycopg[async] is required for AGE backend. "
-                "Run: pip install 'ci-platform[graph]'"
-            )
-    return _psycopg
-
 
 class AGEClient:
     """
-    Async graph client for Apache AGE / PostgreSQL.
+    Sync-core graph client for Apache AGE / PostgreSQL.
     Drop-in interface replacement for Neo4jClient.
 
     All domain copilots (SOC, S2P) use this via:
         from ci_platform.graph import get_graph_client
         graph = get_graph_client()
         results = await graph.run_query(cypher, params)
+
+    DB I/O uses sync psycopg inside asyncio.to_thread() — safe for
+    any event loop (Proactor, Selector, uvloop).
     """
 
     def __init__(
@@ -72,6 +65,8 @@ class AGEClient:
     ) -> None:
         self._dsn = dsn or DATABASE_URL
         self._graph = graph_name or GRAPH_NAME
+        if not self._dsn:
+            raise ValueError("DATABASE_URL is required for AGEClient")
 
     # ── interface parity (Neo4jClient) ────────────────────────────────────────
 
@@ -91,38 +86,25 @@ class AGEClient:
         """
         pass
 
-    # ── connection ────────────────────────────────────────────────────────────
-
-    @asynccontextmanager
-    async def _conn(self):
-        """Async context manager: psycopg connection with AGE loaded."""
-        psycopg = _load_psycopg()
-        conn = await psycopg.AsyncConnection.connect(
-            self._dsn,
-            autocommit=True,
-        )
-        try:
-            await conn.execute("LOAD 'age'")
-            await conn.execute(
-                "SET search_path = ag_catalog, '$user', public"
-            )
-            yield conn
-        finally:
-            await conn.close()
-
     # ── graph setup ───────────────────────────────────────────────────────────
 
     async def ensure_graph(self) -> None:
         """Create AGE graph if it doesn't exist. Idempotent."""
-        async with self._conn() as conn:
-            try:
-                await conn.execute(
-                    "SELECT create_graph(%s)", (self._graph,)
+        def _do():
+            with psycopg.connect(self._dsn, autocommit=True) as conn:
+                conn.execute("LOAD 'age'")
+                conn.execute(
+                    "SET search_path = ag_catalog, '$user', public"
                 )
-                logger.info(f"Created AGE graph: {self._graph}")
-            except Exception as e:
-                if "already exists" not in str(e).lower():
-                    raise
+                try:
+                    conn.execute(
+                        "SELECT create_graph(%s)", (self._graph,)
+                    )
+                    logger.info(f"Created AGE graph: {self._graph}")
+                except Exception as e:
+                    if "already exists" not in str(e).lower():
+                        raise
+        await asyncio.to_thread(_do)
 
     # ── agtype parsing ────────────────────────────────────────────────────────
 
@@ -230,6 +212,49 @@ class AGEClient:
         escaped = str(val).replace("'", "\\'")
         return f"'{escaped}'"
 
+    def _sync_execute(
+        self, cypher: str, parameters: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Synchronous execution.  Opens/closes connection per call.
+        Called from run_query() via asyncio.to_thread().
+        """
+        if not cypher.strip():
+            return []
+
+        query = cypher
+        if parameters:
+            for name, val in parameters.items():
+                query = query.replace(f"${name}", self._format_value(val))
+
+        columns = self._extract_columns(query)
+        sql = self._build_sql(query, columns)
+
+        with psycopg.connect(self._dsn, autocommit=True) as conn:
+            conn.execute("LOAD 'age'")
+            conn.execute(
+                "SET search_path = ag_catalog, '$user', public"
+            )
+            try:
+                cur = conn.execute(sql)
+                rows = cur.fetchall()
+            except Exception as e:
+                logger.error(
+                    f"AGE query error: {e}\n"
+                    f"Query: {query[:300]}\n"
+                    f"Params: {parameters}"
+                )
+                raise
+
+        results: List[Dict[str, Any]] = []
+        for row in rows:
+            row_dict: Dict[str, Any] = {}
+            for i, col in enumerate(columns):
+                raw = row[i] if i < len(row) else None
+                row_dict[col] = self._parse_agtype(raw)
+            results.append(row_dict)
+        return results
+
     async def run_query(
         self,
         query: str,
@@ -239,43 +264,11 @@ class AGEClient:
         Execute a Cypher query against AGE.
         Returns List[Dict] — same shape as Neo4jClient.run_query().
 
-        IMPORTANT — AGE parameter handling:
-        AGE does NOT support $1 positional parameters inside $$ blocks.
-        Parameters are interpolated directly into the Cypher string.
-        Write Cypher with $param_name placeholders.
-        Pass parameters={"param_name": value}.
-        Values are safely formatted by type before interpolation.
+        Async interface — sync I/O runs in thread pool via to_thread().
         """
-        if not query.strip():
-            return []
-
-        # Substitute $name → formatted literal directly in Cypher
-        if parameters:
-            for name, val in parameters.items():
-                query = query.replace(f"${name}", self._format_value(val))
-
-        columns = self._extract_columns(query)
-        sql = self._build_sql(query, columns)
-
-        async with self._conn() as conn:
-            try:
-                cur = await conn.execute(sql)
-                rows = await cur.fetchall()
-                results: List[Dict[str, Any]] = []
-                for row in rows:
-                    row_dict: Dict[str, Any] = {}
-                    for i, col in enumerate(columns):
-                        raw = row[i] if i < len(row) else None
-                        row_dict[col] = self._parse_agtype(raw)
-                    results.append(row_dict)
-                return results
-            except Exception as e:
-                logger.error(
-                    f"AGE query error: {e}\n"
-                    f"Query: {query[:300]}\n"
-                    f"Params: {parameters}"
-                )
-                raise
+        return await asyncio.to_thread(
+            self._sync_execute, query, parameters
+        )
 
     # ── convenience methods (Neo4jClient interface parity) ────────────────────
 
@@ -658,7 +651,6 @@ def get_graph_client(
 
     During Block 8.5 transition in SOC repo:
         from ci_platform.graph import get_graph_client as _age_factory
-        # Replaces: from backend.app.db.neo4j import neo4j_client
         neo4j_client = _age_factory()
     """
     global _client
