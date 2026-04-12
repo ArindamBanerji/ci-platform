@@ -10,7 +10,7 @@ Key AGE dialect differences from Neo4j:
   - Parameters: $name in Cypher body, passed as dict → converted to %s positional
   - Cypher datetime/duration functions NOT supported → use Python datetime/timedelta
   - Return values are agtype (JSONB) → parse with json.loads()
-  - ON CREATE SET NOT supported on relationships → use SET (idempotent for timestamps)
+  - Merge-then-SET pattern required (MERGE/MATCH then SET; no conditional-set clauses)
 
 Connection model:
   - Sync psycopg.connect() per query, executed in asyncio.to_thread()
@@ -133,6 +133,60 @@ class AGEClient:
         except (json.JSONDecodeError, TypeError):
             return val
 
+    def _normalize_value(self, value):
+        """
+        Normalize AGE agtype values to clean Python types.
+        Called once per field in _sync_execute after _parse_agtype.
+        Every consumer gets clean types — no json.loads() at call sites.
+
+        Conversions:
+        - None → None (passthrough)
+        - "null" string → None
+        - JSON-encoded list/dict string → parsed Python list/dict
+        - int/float/bool → passthrough (already typed by _parse_agtype)
+        - Plain string → passthrough (no scalar coercion)
+
+        Note: scalar strings ("42", "true") are intentionally NOT coerced.
+        _parse_agtype already converts AGE agtype scalars to Python types
+        before this method is called. Coercing string scalars here would
+        mistype string IDs that happen to be numeric.
+        """
+        if value is None:
+            return None
+        if isinstance(value, str):
+            if value.strip() == 'null':
+                return None
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, (list, dict)):
+                    return parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return value
+
+    @staticmethod
+    def serialize_for_age(value):
+        """
+        Serialize Python types for AGE Cypher parameter interpolation.
+        Used in _sync_execute when building Cypher query strings.
+
+        Returns a string suitable for direct interpolation into Cypher.
+        """
+        if value is None:
+            return "null"
+        if isinstance(value, (list, tuple)):
+            return f"'{json.dumps(value)}'"
+        if hasattr(value, 'tolist'):  # numpy array
+            return f"'{json.dumps(value.tolist())}'"
+        if isinstance(value, bool):
+            return str(value).lower()
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, str):
+            escaped = value.replace("'", "\\'")
+            return f"'{escaped}'"
+        return f"'{json.dumps(value)}'"
+
     # ── query building ────────────────────────────────────────────────────────
 
     def _extract_columns(self, cypher: str) -> List[str]:
@@ -225,12 +279,12 @@ class AGEClient:
         query = cypher
         if parameters:
             for name, val in parameters.items():
-                query = query.replace(f"${name}", self._format_value(val))
+                query = query.replace(f"${name}", AGEClient.serialize_for_age(val))
 
         columns = self._extract_columns(query)
         sql = self._build_sql(query, columns)
 
-        with psycopg.connect(self._dsn, autocommit=True) as conn:
+        with psycopg.connect(self._dsn, autocommit=True, connect_timeout=5) as conn:
             conn.execute("LOAD 'age'")
             conn.execute(
                 "SET search_path = ag_catalog, '$user', public"
@@ -251,7 +305,7 @@ class AGEClient:
             row_dict: Dict[str, Any] = {}
             for i, col in enumerate(columns):
                 raw = row[i] if i < len(row) else None
-                row_dict[col] = self._parse_agtype(raw)
+                row_dict[col] = self._normalize_value(self._parse_agtype(raw))
             results.append(row_dict)
         return results
 

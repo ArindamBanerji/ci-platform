@@ -2,7 +2,26 @@
   "permissions": {
     "allow": [
       "Bash(python -m pytest tests/ -v)",
-      "Bash(python -m pytest tests/ -q)"
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(python -m pytest tests/test_deployment_qualification.py::test_tau_sweep_gate_fail_uses_lowest_ece -v -s)",
+      "Bash(python -m pytest tests/integration/test_p28_end_to_end.py -v)",
+      "Bash(python -m pytest tests/test_p28_enrichment_advisor.py -v)",
+      "Bash(python -c \"import numpy; print\\(''numpy'', numpy.__version__\\)\")",
+      "Bash(python -m pytest tests/test_centroid_distance.py -v)",
+      "Bash(python -c \"from ci_platform.graph import get_graph_client; print\\(''Import OK''\\)\")",
+      "Bash(python -c \"from ci_platform.graph.age_client import AGEClient; print\\(''AGEClient OK''\\)\")",
+      "Bash(python -m pytest tests/test_age_client.py -v)",
+      "Bash(cmd /c \"set AGE_INTEGRATION=1 && python -m pytest tests/test_age_client.py -v\")",
+      "Bash(AGE_INTEGRATION=1 python -m pytest tests/test_age_client.py -v)",
+      "Bash(wc -l ci_platform/scripts/*.sh ci_platform/scripts/*.ps1)",
+      "Read(//c/Users/baner/CopyFolder/IoT_thoughts/python-projects/kaggle_experiments/claude_projects/gen-ai-roi-demo-v4-v50/backend/**)",
+      "Bash(python -m pytest tests/test_graph_backend_switcher.py -v)",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(python -m pytest tests/test_age_type_roundtrip.py -q)",
+      "Bash(python -m pytest tests/ -q --timeout=30 -x)",
+      "Bash(python -m pytest tests/test_visual_smoke.py tests/test_composite_gate.py -q --timeout=30)",
+      "Bash(python -m pytest tests/ -q --timeout=30)",
+      "Bash(python -m pytest tests/ -q --timeout=60)"
     ]
   }
 }

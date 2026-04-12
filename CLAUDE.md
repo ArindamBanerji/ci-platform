@@ -1,0 +1,70 @@
+# CLAUDE.md — ci-platform (Shared Graph Infrastructure)
+
+## This repo is consumed by gen-ai-roi-demo-v4-v50 (290 call sites)
+
+## Public API — Tier 1 Stable (do not break)
+- AGEClient.run_query(cypher: str, params: dict | None) → list[dict]
+- AGEClient.connect() → None (no-op, per-query connections)
+- AGEClient.close() → None (no-op)
+- All 14 interface-parity methods (see age_client.py)
+- get_graph_client() → AGEClient singleton
+
+## Internal API — Tier 2 Evolving
+- CovarianceEstimator (collects, does not affect scoring at v6.0)
+- DeploymentQualifier (GREEN/AMBER/RED)
+- EntityResolution (exact-match complete, fuzzy pending Block 6.1)
+
+## After any change to this repo
+1. Run this repo's tests: python -m pytest tests/ -v
+   - AGE integration tests require: $env:AGE_INTEGRATION = "1"
+2. Run the consumer's tests:
+   cd ../gen-ai-roi-demo-v4-v50/backend && python -m pytest -v
+3. If you changed a Cypher query: run it standalone against AGE first
+
+## Never do these
+- Change return types of any Tier 1 method without updating
+  gen-ai-roi-demo-v4-v50
+- Rename public methods — 290 call sites depend on them
+- Add event-loop-dependent code (sync psycopg + to_thread is
+  the pattern)
+- Import from gen-ai-roi-demo-v4-v50 (dependency flows one
+  direction only)
+
+## AGE Cypher anti-patterns (do not use)
+- ON CREATE SET / ON MATCH SET → use MATCH-then-CREATE two-step
+- 'count' as column alias → use 'cnt'
+- NOT (a)<-[:REL]-() pattern → use NOT exists()
+- IN clause with list parameters → inline f-string
+- datetime() → use epoch integers
+
+## AGEClient Design
+- Uses sync psycopg wrapped in asyncio.to_thread()
+- Per-query connections (LOAD 'age' + SET search_path per connection)
+- No connection pooling
+- All public methods are async def
+
+## Boundary Enforcement Rules (v5.29)
+
+AGEClient is the **single type normalization point** for all AGE data.
+
+### Read path: `_normalize_value`
+- Called once per field in `_sync_execute` after `_parse_agtype`
+- Converts: `"null"` → `None`, JSON string lists → Python lists, JSON string dicts → Python dicts
+- Consumers NEVER call `json.loads()` on AGEClient output
+- Consumers NEVER check `isinstance(value, str)` to handle AGE serialization
+- If a consumer needs a type guard: fix `_normalize_value`, not the consumer
+
+### Write path: `serialize_for_age`
+- Called for all parameter interpolation in `_sync_execute`
+- Handles: None, list, tuple, numpy array, bool, int, float, string, dict
+- Consumers NEVER build AGE Cypher parameter strings manually
+
+### AGE Cypher anti-patterns (enforced by test)
+- No `ON CREATE SET` / `ON MATCH SET` → two-step MATCH→CREATE
+- No `count` as column alias → use `cnt`
+- No `NOT (a)<-[:REL]-()` → use `NOT exists()` or subquery
+- No `IN $param` → inline f-string
+- No `datetime()` → epoch integers
+- No `labels(n)[0]` → `head(labels(n))`
+- No `toString()` → avoid or cast differently
+- No bare `{id:}` → use `alert_id` / `decision_id`

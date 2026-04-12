@@ -1,0 +1,31 @@
+============================= test session starts =============================
+platform win32 -- Python 3.11.4, pytest-8.3.5, pluggy-1.5.0 -- C:\Users\baner\CopyFolder\IoT_thoughts\python-projects\proj-envs\python_expts_venv\Scripts\python.exe
+cachedir: .pytest_cache
+Fugue tests will be initialized with options:
+rootdir: C:\Users\baner\CopyFolder\IoT_thoughts\python-projects\kaggle_experiments\claude_projects\ci-platform
+configfile: pyproject.toml
+plugins: anyio-4.12.0, fugue-0.9.1, asyncio-0.23.5, cov-6.1.0, env-1.1.5, freezegun-0.4.2, timeout-2.3.1, typeguard-4.2.1
+asyncio: mode=Mode.STRICT
+collecting ... collected 13 items
+
+tests/test_age_client.py::test_age_client_imports_cleanly PASSED         [  7%]
+tests/test_age_client.py::test_get_graph_client_returns_singleton PASSED [ 15%]
+tests/test_age_client.py::test_extract_columns_simple PASSED             [ 23%]
+tests/test_age_client.py::test_extract_columns_alias PASSED              [ 30%]
+tests/test_age_client.py::test_parse_agtype_node PASSED                  [ 38%]
+tests/test_age_client.py::test_sequence_count_uses_python_timedelta_not_duration PASSED [ 46%]
+tests/test_age_client.py::test_run_query_no_datetime_in_cypher PASSED    [ 53%]
+tests/test_age_client.py::test_age_graph_queryable PASSED                [ 61%]
+tests/test_age_client.py::test_age_entity_node_merge_idempotent PASSED   [ 69%]
+tests/test_age_client.py::test_age_triggered_evolution_traversal PASSED  [ 76%]
+tests/test_age_client.py::test_age_campaign_entity PASSED                [ 84%]
+tests/test_age_client.py::test_backlog015_decision_distance_log PASSED   [ 92%]
+tests/test_age_client.py::test_age_merge_idempotent PASSED               [100%]
+
+============================== warnings summary ===============================
+..\..\..\proj-envs\python_expts_venv\Lib\site-packages\pytest_freezegun.py:17: 26 warnings
+  C:\Users\baner\CopyFolder\IoT_thoughts\python-projects\proj-envs\python_expts_venv\Lib\site-packages\pytest_freezegun.py:17: DeprecationWarning: distutils Version classes are deprecated. Use packaging.version instead.
+    if LooseVersion(pytest.__version__) < LooseVersion('3.6.0'):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 13 passed, 26 warnings in 2.05s =======================
