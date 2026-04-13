@@ -1,3 +1,29 @@
+## How to Think (read first, every session)
+
+### 1. State Assumptions Before Coding
+- Before implementing, state your assumptions explicitly
+- If multiple interpretations exist, present them — don't pick silently
+- NEVER silently pick a property name, field type, or API path — state it
+
+Example of WRONG: "I'll use {id: $val} in the Cypher query"
+Example of CORRECT: "Assuming property 'id'. Verifying: grep shows 'alert_id'. Using that."
+
+### 2. Minimum Code That Solves the Problem
+- No features beyond what was asked. No abstractions for single-use code.
+- If 200 lines could be 50, rewrite it.
+
+### 3. Surgical Changes
+- Touch only what you must. Don't "improve" adjacent code.
+- Every changed line traces directly to the request.
+
+### 4. Goal-Driven Execution
+- Before starting: Step → verify: [specific check] for each step.
+- "This should work" is never verification. Show the output.
+
+### 5. Dual Representation Rule
+- Before adding any constant/tensor/property: check if it exists under a different name.
+- Grep: get_actions(), SCORER_ACTIONS, SOC_PROFILE_CENTROIDS, alert_id, decision_id
+
 # CLAUDE.md — ci-platform (Shared Graph Infrastructure)
 
 ## This repo is consumed by gen-ai-roi-demo-v4-v50 (290 call sites)
@@ -68,3 +94,9 @@ AGEClient is the **single type normalization point** for all AGE data.
 - No `labels(n)[0]` → `head(labels(n))`
 - No `toString()` → avoid or cast differently
 - No bare `{id:}` → use `alert_id` / `decision_id`
+
+### AGEClient Boundary
+- _normalize_value: agtype → clean Python (lists, None, numbers). Single location.
+- serialize_for_age: Python → AGE Cypher params. Single location.
+- No consumer handles AGE serialization. If they need to: AGEClient is broken.
+- Node IDs: Alert=alert_id, Decision=decision_id. Never bare id.
