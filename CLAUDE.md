@@ -1,129 +1,108 @@
+# ⚠️ GROUNDING CONTRACT (non-negotiable)
+
+**These rules apply to every AI coding agent working in this repo.**
+
+1. **Docs are aspirational until proven in code.** Check actual source files.
+2. **Cite file + line for every behavioral claim.**
+3. **Code and tests beat docs.** Discrepancy = DRIFT, report and stop.
+4. **Check downstream consumers before changing interfaces.** This repo has
+   290 call sites in gen-ai-roi-demo-v4-v50. Grep before changing.
+5. **Verify after every change:** `python -m pytest tests/ -v`
+6. **After every session:** run consumer tests too:
+   `cd ../gen-ai-roi-demo-v4-v50/backend && python -m pytest -v`
+
+---
+
 ## How to Think (read first, every session)
 
-### 1. State Assumptions Before Coding
-- Before implementing, state your assumptions explicitly
-- If multiple interpretations exist, present them — don't pick silently
-- NEVER silently pick a property name, field type, or API path — state it
+1. State assumptions before coding. Never silently pick a field name.
+2. Minimum code that solves the problem.
+3. Surgical changes only.
+4. Verify after every step — "this should work" is not verification.
+5. Before adding a constant: grep to check if it exists under a different name.
 
-Example of WRONG: "I'll use {id: $val} in the Cypher query"
-Example of CORRECT: "Assuming property 'id'. Verifying: grep shows 'alert_id'. Using that."
+---
 
-### 2. Minimum Code That Solves the Problem
-- No features beyond what was asked. No abstractions for single-use code.
-- If 200 lines could be 50, rewrite it.
+## What This Repo Is
 
-### 3. Surgical Changes
-- Touch only what you must. Don't "improve" adjacent code.
-- Every changed line traces directly to the request.
+ci-platform is the **shared graph infrastructure library**. It provides
+AGEClient — the single choke point through which every Cypher query in the
+entire platform passes. Changing AGEClient breaks 290 call sites.
 
-### 4. Goal-Driven Execution
-- Before starting: Step → verify: [specific check] for each step.
-- "This should work" is never verification. Show the output.
-
-### 5. Dual Representation Rule
-- Before adding any constant/tensor/property: check if it exists under a different name.
-- Grep: get_actions(), SCORER_ACTIONS, SOC_PROFILE_CENTROIDS, alert_id, decision_id
-
-# CLAUDE.md — ci-platform (Shared Graph Infrastructure)
-
-## This repo is consumed by gen-ai-roi-demo-v4-v50 (290 call sites)
+```
+This repo:  AGEClient (age_client.py)
+            ↓
+Consumer:   gen-ai-roi-demo-v4-v50/backend/app/db/neo4j.py (switcher)
+            ↓
+            290+ call sites in routers
+```
 
 ## Public API — Tier 1 Stable (do not break)
-- AGEClient.run_query(cypher: str, params: dict | None) → list[dict]
-- AGEClient.connect() → None (no-op, per-query connections)
-- AGEClient.close() → None (no-op)
+
+- `AGEClient.run_query(cypher: str, params: dict | None) → list[dict]`
+- `AGEClient.connect() → None` (no-op, per-query connections)
+- `AGEClient.close() → None` (no-op)
 - All 14 interface-parity methods (see age_client.py)
-- get_graph_client() → AGEClient singleton
+- `get_graph_client() → AGEClient` singleton
 
 ## Internal API — Tier 2 Evolving
-- CovarianceEstimator (collects, does not affect scoring at v6.0)
-- DeploymentQualifier (GREEN/AMBER/RED)
-- EntityResolution (exact-match complete, fuzzy pending Block 6.1)
 
-## After any change to this repo
-1. Run this repo's tests: python -m pytest tests/ -v
-   - AGE integration tests require: $env:AGE_INTEGRATION = "1"
-2. Run the consumer's tests:
-   cd ../gen-ai-roi-demo-v4-v50/backend && python -m pytest -v
-3. If you changed a Cypher query: run it standalone against AGE first
+- CovarianceEstimator, DeploymentQualifier, EntityResolution
 
-## Never do these
-- Change return types of any Tier 1 method without updating
-  gen-ai-roi-demo-v4-v50
-- Rename public methods — 290 call sites depend on them
-- Add event-loop-dependent code (sync psycopg + to_thread is
-  the pattern)
-- Import from gen-ai-roi-demo-v4-v50 (dependency flows one
-  direction only)
+---
 
-## AGE Cypher anti-patterns (do not use)
-- ON CREATE SET / ON MATCH SET → use MATCH-then-CREATE two-step
-- 'count' as column alias → use 'cnt'
-- NOT (a)<-[:REL]-() pattern → use NOT exists()
-- IN clause with list parameters → inline f-string
-- datetime() → use epoch integers
+## AGEClient Implementation — How It Works and Why
 
-## AGEClient Design
-- Uses sync psycopg wrapped in asyncio.to_thread()
+AGE wraps Cypher in PostgreSQL: `SELECT * FROM cypher('graph', $$ CYPHER $$) AS (col agtype)`.
+This means:
+
+### 1. No MERGE — AGE does not implement it
+Queries with MERGE either error or silently produce no result.
+`_check_safe_cypher()` MUST reject `MERGE (` with ValueError.
+Use CREATE (new nodes) or MATCH + SET (updates).
+
+### 2. No $param — AGE's Cypher parser doesn't support them
+`_sync_execute()` does string substitution: `query.replace(f"${name}", serialize_for_age(val))`.
+**Known bug:** naive `.replace()` causes `$analyst` to match inside `$analyst_action`.
+Fix: sort param names by length descending before substituting.
+
+### 3. SET n = {props} wipes all properties
+`_check_safe_cypher()` rejects `SET n = {}` with ValueError.
+Use `SET n.prop = val` or `SET n += {props}`.
+
+### 4. No date() — use epoch integers
+### 5. No array properties — serialize as JSON strings
+### 6. `count` as column alias is reserved — use `cnt`
+
+### Two Boundary Functions
+
+| Function | Direction | Purpose |
+|---|---|---|
+| `_normalize_value()` | AGE → Python | Converts agtype to clean Python (lists, None, numbers) |
+| `serialize_for_age()` | Python → AGE | Converts Python values to inline Cypher strings |
+
+**Rule:** No consumer handles AGE serialization. If they need to, AGEClient is broken.
+
+### Design Pattern
+- Sync psycopg wrapped in `asyncio.to_thread()`
 - Per-query connections (LOAD 'age' + SET search_path per connection)
 - No connection pooling
-- All public methods are async def
+- All public methods are `async def`
+- Retry with jitter on concurrent write conflicts (3 attempts, 100-250ms)
 
-## Boundary Enforcement Rules (v5.29)
+---
 
-AGEClient is the **single type normalization point** for all AGE data.
+## Rules
 
-### Read path: `_normalize_value`
-- Called once per field in `_sync_execute` after `_parse_agtype`
-- Converts: `"null"` → `None`, JSON string lists → Python lists, JSON string dicts → Python dicts
-- Consumers NEVER call `json.loads()` on AGEClient output
-- Consumers NEVER check `isinstance(value, str)` to handle AGE serialization
-- If a consumer needs a type guard: fix `_normalize_value`, not the consumer
+- Do NOT use git directly. User handles all git operations.
+- Do NOT import from gen-ai-roi-demo-v4-v50 (dependency flows one direction).
+- Do NOT add event-loop-dependent code. Sync psycopg + to_thread is the pattern.
+- Do NOT rename public methods — 290 call sites depend on them.
+- asyncio.run() not asyncio.get_event_loop() (broken on Windows Python 3.11+).
 
-### Write path: `serialize_for_age`
-- Called for all parameter interpolation in `_sync_execute`
-- Handles: None, list, tuple, numpy array, bool, int, float, string, dict
-- Consumers NEVER build AGE Cypher parameter strings manually
+## After Any Change
 
-### AGE Cypher anti-patterns (enforced by test)
-- No `ON CREATE SET` / `ON MATCH SET` → two-step MATCH→CREATE
-- No `count` as column alias → use `cnt`
-- No `NOT (a)<-[:REL]-()` → use `NOT exists()` or subquery
-- No `IN $param` → inline f-string
-- No `datetime()` → epoch integers
-- No `labels(n)[0]` → `head(labels(n))`
-- No `toString()` → avoid or cast differently
-- No bare `{id:}` → use `alert_id` / `decision_id`
-
-### AGEClient Boundary
-- _normalize_value: agtype → clean Python (lists, None, numbers). Single location.
-- serialize_for_age: Python → AGE Cypher params. Single location.
-- No consumer handles AGE serialization. If they need to: AGEClient is broken.
-- Node IDs: Alert=alert_id, Decision=decision_id. Never bare id.
-
-### No Silent Failure on Displayed Metrics
-- If a try/except computes a NUMBER shown in the UI: the except block
-  must set a flag (estimated=True, source="fallback") — never bare pass
-- If a try/except computes OPTIONAL enrichment: bare pass is acceptable
-- NEVER hardcode a number that looks like a computed metric (0.89, 23, 127)
-  without a comment explaining why it's a constant and not computed
-- The test: if the graph is empty, does the UI show zeros or plausible-looking
-  fake numbers? If fake numbers: it's a mockup, not a fallback.
-
-### AGE Is Not Neo4j — Three Critical Differences
-
-1. **SET n = {props} WIPES all other properties**
-   - NEVER: `SET d = {category: 'x'}` — destroys every other property
-   - ALWAYS: `SET d.category = 'x'` — preserves all other properties
-   - SAFE for bulk: `SET d += {a: 1, b: 2}` — merges, preserves existing
-   - AGEClient rejects the destructive form with ValueError
-
-2. **Concurrent writes to the same node fail**
-   - "Entity failed to be updated: 3" = PostgreSQL row lock conflict
-   - AGEClient retries with jitter (3 attempts, 100-250ms backoff)
-   - Avoid concurrent writes to the same node when possible
-
-3. **Decision nodes must be created atomically with their edge**
-   - ALWAYS: `MATCH (a:Alert) CREATE (d:Decision {...})-[:DECIDED_ON]->(a)`
-   - NEVER: CREATE Decision as one query, then edge as a second
-   - If MATCH finds no Alert, no Decision is created (proven atomic)
+1. Run this repo: `python -m pytest tests/ -v`
+   - AGE integration tests require: `$env:AGE_INTEGRATION = "1"`
+2. Run consumer repo: `cd ../gen-ai-roi-demo-v4-v50/backend && python -m pytest -v`
+3. If you changed a Cypher query: run it standalone against AGE first.

@@ -10,7 +10,7 @@ Key AGE dialect differences from Neo4j:
   - Parameters: $name in Cypher body, passed as dict → converted to %s positional
   - Cypher datetime/duration functions NOT supported → use Python datetime/timedelta
   - Return values are agtype (JSONB) → parse with json.loads()
-  - Merge-then-SET pattern required (MERGE/MATCH then SET; no conditional-set clauses)
+  - MATCH-then-CREATE pattern required (MERGE unsupported; two-step for idempotency)
 
 Connection model:
   - Sync psycopg.connect() per query, executed in asyncio.to_thread()
@@ -29,7 +29,9 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -42,6 +44,28 @@ DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://localhost:5432/soc_copilot",
 )
+
+_DESTRUCTIVE_SET_RE = re.compile(r'\bSET\s+(\w+)\s*=\s*\{')
+_MERGE_RE = re.compile(r'\bMERGE\s*\(', re.IGNORECASE)
+
+
+def _check_safe_cypher(cypher: str) -> None:
+    """Reject patterns AGE does not support: SET n = {} and MERGE (."""
+    for match in _DESTRUCTIVE_SET_RE.finditer(cypher):
+        var_fragment = cypher[match.start():match.end()]
+        before_eq = var_fragment.split('=')[0]
+        if '.' not in before_eq and '+' not in before_eq:
+            raise ValueError(
+                f"Forbidden: 'SET n = {{}}' replaces ALL properties on the node. "
+                f"Use 'SET n.prop = val' or 'SET n += {{props}}' instead. "
+                f"Query: {cypher[:200]}"
+            )
+    if _MERGE_RE.search(cypher):
+        raise ValueError(
+            f"Forbidden: MERGE is not supported by Apache AGE. "
+            f"Use CREATE for new nodes or MATCH + SET for updates. "
+            f"Query: {cypher[:200]}"
+        )
 
 
 class AGEClient:
@@ -276,23 +300,32 @@ class AGEClient:
         if not cypher.strip():
             return []
 
+        _check_safe_cypher(cypher)
         query = cypher
         if parameters:
-            for name, val in parameters.items():
-                query = query.replace(f"${name}", AGEClient.serialize_for_age(val))
+            for name in sorted(parameters, key=len, reverse=True):
+                query = query.replace(f"${name}", AGEClient.serialize_for_age(parameters[name]))
 
         columns = self._extract_columns(query)
         sql = self._build_sql(query, columns)
 
-        with psycopg.connect(self._dsn, autocommit=True, connect_timeout=5) as conn:
-            conn.execute("LOAD 'age'")
-            conn.execute(
-                "SET search_path = ag_catalog, '$user', public"
-            )
+        rows = None
+        MAX_RETRIES = 3
+        for attempt in range(MAX_RETRIES):
             try:
-                cur = conn.execute(sql)
-                rows = cur.fetchall()
+                with psycopg.connect(self._dsn, autocommit=True, connect_timeout=5) as conn:
+                    conn.execute("LOAD 'age'")
+                    conn.execute(
+                        "SET search_path = ag_catalog, '$user', public"
+                    )
+                    cur = conn.execute(sql)
+                    rows = cur.fetchall()
+                break
             except Exception as e:
+                if "Entity failed to be updated" in str(e) and attempt < MAX_RETRIES - 1:
+                    delay = 0.1 * (attempt + 1) + random.uniform(0, 0.05)
+                    time.sleep(delay)
+                    continue
                 logger.error(
                     f"AGE query error: {e}\n"
                     f"Query: {query[:300]}\n"
@@ -535,6 +568,11 @@ class AGEClient:
         category: str = "unknown",
         factor_vector: Optional[List[float]] = None,
         patterns_matched: Optional[List[str]] = None,
+        reasoning: Optional[str] = None,
+        pattern_id: Optional[str] = None,
+        playbook_id: Optional[str] = None,
+        nodes_consulted: int = 47,
+        context_snapshot: Optional[Dict] = None,
         **kwargs,
     ) -> Dict:
         """
@@ -549,81 +587,165 @@ class AGEClient:
         ctx_id = f"{decision_id}-ctx"
         patterns_str = json.dumps(patterns_matched or [])
 
+        params = {
+            "did": decision_id,
+            "alert_id": alert_id,
+            "action": action,
+            "confidence": confidence,
+            "category": category,
+            "ts_epoch": ts_epoch,
+            "ts": ts,
+            "patterns": patterns_str,
+            "reasoning": reasoning,
+            "pattern_id": pattern_id,
+            "playbook_id": playbook_id,
+            "nodes_consulted": nodes_consulted,
+            "context_snapshot": json.dumps(context_snapshot or {}),
+        }
+
+        # Two-step MATCH-then-CREATE: AGE does not support MERGE.
+        # Step 1: update if Decision node already exists.
         results = await self.run_query(
             """
-            MERGE (d:Decision {decision_id: $did})
-            SET d.alert_id    = $alert_id,
-                d.action      = $action,
-                d.confidence  = $confidence,
-                d.category    = $category,
-                d.timestamp_epoch = $ts_epoch,
-                d.created_at  = $ts,
-                d.patterns_matched = $patterns
+            MATCH (d:Decision {decision_id: $did})
+            SET d.alert_id         = $alert_id,
+                d.action           = $action,
+                d.confidence       = $confidence,
+                d.category         = $category,
+                d.timestamp_epoch  = $ts_epoch,
+                d.created_at       = $ts,
+                d.patterns_matched = $patterns,
+                d.reasoning        = $reasoning,
+                d.pattern_id       = $pattern_id,
+                d.playbook_id      = $playbook_id,
+                d.nodes_consulted  = $nodes_consulted,
+                d.context_snapshot = $context_snapshot
             RETURN d
             """,
-            {
-                "did": decision_id,
-                "alert_id": alert_id,
-                "action": action,
-                "confidence": confidence,
-                "category": category,
-                "ts_epoch": ts_epoch,
-                "ts": ts,
-                "patterns": patterns_str,
-            },
+            params,
         )
-
-        # Create DecisionContext node if patterns exist (replaces FOREACH)
-        if patterns_matched:
-            await self.run_query(
+        if not results:
+            # Step 2: create if not found.
+            results = await self.run_query(
                 """
-                MERGE (ctx:DecisionContext {context_id: $ctx_id})
+                CREATE (d:Decision {
+                    decision_id:      $did,
+                    alert_id:         $alert_id,
+                    action:           $action,
+                    confidence:       $confidence,
+                    category:         $category,
+                    timestamp_epoch:  $ts_epoch,
+                    created_at:       $ts,
+                    patterns_matched: $patterns,
+                    reasoning:        $reasoning,
+                    pattern_id:       $pattern_id,
+                    playbook_id:      $playbook_id,
+                    nodes_consulted:  $nodes_consulted,
+                    context_snapshot: $context_snapshot
+                })
+                RETURN d
+                """,
+                params,
+            )
+
+        # Two-step MATCH-then-CREATE for DecisionContext node.
+        if patterns_matched:
+            ctx_updated = await self.run_query(
+                """
+                MATCH (ctx:DecisionContext {context_id: $ctx_id})
                 SET ctx.decision_id = $did,
                     ctx.created_at  = $ts
+                RETURN ctx
                 """,
                 {"ctx_id": ctx_id, "did": decision_id, "ts": ts},
             )
+            if not ctx_updated:
+                await self.run_query(
+                    """
+                    CREATE (ctx:DecisionContext {
+                        context_id:  $ctx_id,
+                        decision_id: $did,
+                        created_at:  $ts
+                    })
+                    RETURN ctx
+                    """,
+                    {"ctx_id": ctx_id, "did": decision_id, "ts": ts},
+                )
 
         return results[0].get("d", {}) if results else {}
 
     async def create_evolution_event(
         self,
-        alert_id: str,
-        entity_id: str,
-        action: str,
-        verified_correct: bool,
+        alert_id: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        action: Optional[str] = None,
+        verified_correct: bool = False,
         impact: float = 0.0,
         magnitude: float = 0.0,
         before_state: Optional[str] = None,
         after_state: Optional[str] = None,
+        event_id: Optional[str] = None,
+        event_type: Optional[str] = None,
+        triggered_by: Optional[str] = None,
+        description: Optional[str] = None,
         **kwargs,
     ) -> bool:
-        """Create TRIGGERED_EVOLUTION relationship."""
+        """
+        Create TRIGGERED_EVOLUTION relationship between Alert and Entity nodes.
+
+        Accepts both calling conventions:
+        - Legacy (alert_id, entity_id, action, verified_correct) — internal graph writes
+        - Event-style (event_id, event_type, triggered_by, description) — evolution.py callers
+          In event-style mode alert_id/entity_id are absent; returns True without a graph write.
+        """
+        if not alert_id or not entity_id:
+            # Event-style caller (evolution.py:258) — no Alert/Entity context to link.
+            return True
         ts = datetime.now(timezone.utc).isoformat()
         ts_epoch = int(datetime.now(timezone.utc).timestamp())
-        await self.run_query(
+        params = {
+            "aid": alert_id,
+            "eid": entity_id,
+            "action": action,
+            "vc": verified_correct,
+            "impact": impact,
+            "magnitude": magnitude,
+            "ts_epoch": ts_epoch,
+            "ts": ts,
+        }
+
+        # Two-step MATCH-then-CREATE: AGE does not support MERGE.
+        # Step 1: update relationship properties if it already exists.
+        updated = await self.run_query(
             """
-            MATCH (a:Alert   {alert_id:   $aid})
-            MATCH (e:Entity  {entity_id:  $eid})
-            MERGE (a)-[r:TRIGGERED_EVOLUTION {action: $action}]->(e)
-            SET r.verified_correct  = $vc,
-                r.impact            = $impact,
-                r.magnitude         = $magnitude,
-                r.timestamp_epoch   = $ts_epoch,
-                r.created_at        = $ts
-            RETURN count(r) AS cnt
+            MATCH (a:Alert {alert_id: $aid})-[r:TRIGGERED_EVOLUTION {action: $action}]->(e:Entity {entity_id: $eid})
+            SET r.verified_correct = $vc,
+                r.impact           = $impact,
+                r.magnitude        = $magnitude,
+                r.timestamp_epoch  = $ts_epoch,
+                r.created_at       = $ts
+            RETURN r
             """,
-            {
-                "aid": alert_id,
-                "eid": entity_id,
-                "action": action,
-                "vc": verified_correct,
-                "impact": impact,
-                "magnitude": magnitude,
-                "ts_epoch": ts_epoch,
-                "ts": ts,
-            },
+            params,
         )
+        if not updated:
+            # Step 2: create relationship if not found.
+            await self.run_query(
+                """
+                MATCH (a:Alert {alert_id: $aid})
+                MATCH (e:Entity {entity_id: $eid})
+                CREATE (a)-[r:TRIGGERED_EVOLUTION {
+                    action:           $action,
+                    verified_correct: $vc,
+                    impact:           $impact,
+                    magnitude:        $magnitude,
+                    timestamp_epoch:  $ts_epoch,
+                    created_at:       $ts
+                }]->(e)
+                RETURN r
+                """,
+                params,
+            )
         return True
 
     async def get_recent_evolution_events(
@@ -666,23 +788,42 @@ class AGEClient:
         gamma metric. Must be logged from pilot Day 1.
         """
         ts = datetime.now(timezone.utc).isoformat()
-        await self.run_query(
+        params = {
+            "did": decision_id,
+            "dist": float(centroid_distance_to_canonical),
+            "phv": float(pattern_history_value),
+            "acd": json.dumps(alert_category_distribution),
+            "ts": ts,
+        }
+
+        # Two-step MATCH-then-CREATE: AGE does not support MERGE.
+        # Step 1: update if node already exists.
+        updated = await self.run_query(
             """
-            MERGE (d:DecisionDistanceLog {decision_id: $did})
+            MATCH (d:DecisionDistanceLog {decision_id: $did})
             SET d.centroid_distance_to_canonical = $dist,
                 d.pattern_history_value          = $phv,
                 d.alert_category_distribution    = $acd,
                 d.timestamp                      = $ts
             RETURN d
             """,
-            {
-                "did": decision_id,
-                "dist": float(centroid_distance_to_canonical),
-                "phv": float(pattern_history_value),
-                "acd": json.dumps(alert_category_distribution),
-                "ts": ts,
-            },
+            params,
         )
+        if not updated:
+            # Step 2: create if not found.
+            await self.run_query(
+                """
+                CREATE (d:DecisionDistanceLog {
+                    decision_id:                    $did,
+                    centroid_distance_to_canonical: $dist,
+                    pattern_history_value:          $phv,
+                    alert_category_distribution:    $acd,
+                    timestamp:                      $ts
+                })
+                RETURN d
+                """,
+                params,
+            )
         return True
 
 

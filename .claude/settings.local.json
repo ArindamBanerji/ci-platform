@@ -21,7 +21,10 @@
       "Bash(python -m pytest tests/ -q --timeout=30 -x)",
       "Bash(python -m pytest tests/test_visual_smoke.py tests/test_composite_gate.py -q --timeout=30)",
       "Bash(python -m pytest tests/ -q --timeout=30)",
-      "Bash(python -m pytest tests/ -q --timeout=60)"
+      "Bash(python -m pytest tests/ -q --timeout=60)",
+      "Bash(python -c ':*)",
+      "Skill(codex:rescue)",
+      "Bash(python -m pytest tests/test_graph_backend_switcher.py tests/test_age_client.py -v)"
     ]
   }
 }
