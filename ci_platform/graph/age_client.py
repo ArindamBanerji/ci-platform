@@ -32,6 +32,7 @@ import os
 import random
 import re
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -484,6 +485,16 @@ class AGEClient:
         except (TypeError, ValueError, KeyError):
             return 0
 
+    async def count_correct_decisions(self) -> int:
+        """Count Decision nodes where correct = true."""
+        try:
+            results = await self.run_query(
+                "MATCH (d:Decision) WHERE d.correct = true RETURN count(d) AS cnt"
+            )
+            return int(results[0]["cnt"]) if results else 0
+        except (TypeError, ValueError, KeyError):
+            return 0
+
     async def count_decisions_by_category(self) -> dict:
         """
         Returns {category: count} for all Decision nodes grouped by category.
@@ -699,7 +710,41 @@ class AGEClient:
           In event-style mode alert_id/entity_id are absent; returns True without a graph write.
         """
         if not alert_id or not entity_id:
-            # Event-style caller (evolution.py:258) — no Alert/Entity context to link.
+            # Event-style caller (evolution.py:258): create EvolutionEvent node and
+            # TRIGGERED_EVOLUTION edge from the Decision that triggered it.
+            ts_epoch = int(datetime.now(timezone.utc).timestamp())
+            eid = event_id or str(uuid.uuid4())
+            await self.run_query(
+                """
+                MATCH (d:Decision {decision_id: $triggered_by})
+                CREATE (e:EvolutionEvent {
+                    id:              $evt_id,
+                    event_type:      $evt_type,
+                    triggered_by:    $triggered_by,
+                    before_state:    $before_state,
+                    after_state:     $after_state,
+                    description:     $description,
+                    timestamp_epoch: $ts_epoch
+                })
+                CREATE (d)-[:TRIGGERED_EVOLUTION {
+                    impact:          $impact,
+                    magnitude:       $magnitude,
+                    timestamp_epoch: $ts_epoch
+                }]->(e)
+                RETURN e
+                """,
+                {
+                    "evt_id": eid,
+                    "evt_type": event_type or "unknown",
+                    "triggered_by": triggered_by or "",
+                    "before_state": before_state or "",
+                    "after_state": after_state or "",
+                    "description": description or "",
+                    "ts_epoch": ts_epoch,
+                    "impact": impact,
+                    "magnitude": magnitude,
+                },
+            )
             return True
         ts = datetime.now(timezone.utc).isoformat()
         ts_epoch = int(datetime.now(timezone.utc).timestamp())
