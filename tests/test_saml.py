@@ -42,6 +42,7 @@ def test_validate_invalid_response():
 
 
 def test_validate_valid_response():
+    # Without IdP cert, validate_response must return error (D7 REVISED: no fallback)
     saml_xml = """<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
         xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_resp1">
       <saml:Assertion>
@@ -53,8 +54,8 @@ def test_validate_valid_response():
     encoded = base64.b64encode(saml_xml.encode()).decode()
     service = SAMLService(SAMLConfig())
     result = service.validate_response(encoded)
-    assert result["valid"] is True
-    assert result["user_email"] == "analyst@firm.com"
+    assert result["valid"] is False
+    assert "cert" in result["error"].lower()
 
 
 def test_is_configured_false_default():
@@ -70,3 +71,38 @@ def test_is_configured_true():
     )
     service = SAMLService(config)
     assert service.is_configured() is True
+
+
+def test_validate_response_requires_cert():
+    """Without IdP cert, validate_response returns error."""
+    cfg = SAMLConfig(sp_entity_id="test", sp_acs_url="test")
+    svc = SAMLService(cfg)
+    result = svc.validate_response("dGVzdA==")
+    assert result["valid"] is False
+    assert "cert" in result["error"].lower()
+
+
+def test_validate_response_returns_attributes_key():
+    """Response dict always includes attributes key."""
+    cfg = SAMLConfig(sp_entity_id="test", sp_acs_url="test")
+    svc = SAMLService(cfg)
+    result = svc.validate_response("dGVzdA==")
+    assert "attributes" in result
+
+
+def test_parse_xml_only_extracts_nameid():
+    """Internal XML parser still extracts NameID."""
+    saml_xml = """<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
+        xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_resp1">
+      <saml:Assertion>
+        <saml:Subject>
+          <saml:NameID>analyst@firm.com</saml:NameID>
+        </saml:Subject>
+      </saml:Assertion>
+    </samlp:Response>"""
+    encoded = base64.b64encode(saml_xml.encode()).decode()
+    cfg = SAMLConfig()
+    svc = SAMLService(cfg)
+    result = svc._parse_xml_only(encoded)
+    assert result["valid"] is True
+    assert result["user_email"] == "analyst@firm.com"

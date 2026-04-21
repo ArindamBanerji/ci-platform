@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 from urllib.parse import urlencode
 
+from onelogin.saml2.auth import OneLogin_Saml2_Auth
+
 
 @dataclass
 class SAMLConfig:
@@ -99,24 +101,77 @@ class SAMLService:
             "issue_instant": issue_instant,
         }
 
-    def validate_response(self, saml_response: str) -> Dict:
+    def validate_response(self, saml_response: str,
+                          request_data: dict = None) -> Dict:
         """
-        Decode and parse a base64-encoded SAMLResponse.
+        Validate a base64-encoded SAMLResponse.
 
-        Extracts NameID as user_email. Signature verification and assertion
-        decryption are delegated to python3-saml at deployment.
+        When IdP x509 cert is configured: full python3-saml
+        signature verification + assertion validation.
+        When not configured: returns error (no fallback).
+
+        Args:
+            saml_response: base64-encoded SAMLResponse from IdP
+            request_data: dict with keys for python3-saml context:
+                {"http_host": "localhost:8001",
+                 "script_name": "/saml/acs",
+                 "https": "off",
+                 "post_data": {"SAMLResponse": saml_response}}
+
+        Returns:
+            {"valid": True/False, "user_email": str|None,
+             "session_index": str|None, "attributes": dict,
+             "error": str|None}
         """
+        if not self._config.idp_x509_cert:
+            return {
+                "valid": False,
+                "user_email": None,
+                "session_index": None,
+                "attributes": {},
+                "error": "IdP x509 cert required for SAML validation",
+            }
+        try:
+            return self._validate_with_python3_saml(saml_response, request_data)
+        except Exception as exc:
+            return {
+                "valid": False,
+                "user_email": None,
+                "session_index": None,
+                "attributes": {},
+                "error": str(exc),
+            }
+
+    def is_configured(self) -> bool:
+        """True when all required IdP details are present."""
+        cfg = self._config
+        return bool(cfg.idp_entity_id and cfg.idp_sso_url and cfg.idp_x509_cert)
+
+    # ── private helpers ──────────────────────────────────────────────────────
+
+    def _parse_xml_only(self, saml_response: str) -> Dict:
+        """Parse base64 SAMLResponse XML without signature verification. Test use only."""
         try:
             decoded = base64.b64decode(saml_response).decode("utf-8")
         except Exception as exc:
-            return {"valid": False, "user_email": None, "user_name": None,
-                    "session_index": None, "error": f"Base64 decode error: {exc}"}
+            return {
+                "valid": False,
+                "user_email": None,
+                "session_index": None,
+                "attributes": {},
+                "error": f"Base64 decode error: {exc}",
+            }
 
         try:
             root = ET.fromstring(decoded)
         except ET.ParseError as exc:
-            return {"valid": False, "user_email": None, "user_name": None,
-                    "session_index": None, "error": f"XML parse error: {exc}"}
+            return {
+                "valid": False,
+                "user_email": None,
+                "session_index": None,
+                "attributes": {},
+                "error": f"XML parse error: {exc}",
+            }
 
         name_id = _find_text(root, [
             f".//{{{_NS_SAML}}}NameID",
@@ -128,21 +183,84 @@ class SAMLService:
             ".//AuthnStatement",
         ], "SessionIndex")
 
-        # Best-effort: treat NameID as email if it contains '@'
         user_email = name_id if (name_id and "@" in name_id) else None
 
         return {
             "valid": True,
             "user_email": user_email,
-            "user_name": name_id,
             "session_index": session_index,
+            "attributes": {},
             "error": None,
         }
 
-    def is_configured(self) -> bool:
-        """True when all required IdP details are present."""
+    def _validate_with_python3_saml(self, saml_response: str,
+                                     request_data: dict) -> Dict:
+        """Full signature + assertion verification via python3-saml."""
         cfg = self._config
-        return bool(cfg.idp_entity_id and cfg.idp_sso_url and cfg.idp_x509_cert)
+        settings_dict = {
+            "strict": False,
+            "debug": False,
+            "sp": {
+                "entityId": cfg.sp_entity_id,
+                "assertionConsumerService": {
+                    "url": cfg.sp_acs_url,
+                    "binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST",
+                },
+                "singleLogoutService": {
+                    "url": cfg.sp_sls_url,
+                    "binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect",
+                },
+                "NameIDFormat": "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified",
+                "x509cert": "",
+                "privateKey": "",
+            },
+            "idp": {
+                "entityId": cfg.idp_entity_id,
+                "singleSignOnService": {
+                    "url": cfg.idp_sso_url,
+                    "binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST",
+                },
+                "singleLogoutService": {
+                    "url": cfg.idp_sls_url,
+                    "binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect",
+                },
+                "x509cert": cfg.idp_x509_cert,
+            },
+        }
+
+        req = {
+            "https": request_data.get("https", "off") if request_data else "off",
+            "http_host": request_data.get("http_host", "localhost") if request_data else "localhost",
+            "script_name": request_data.get("script_name", "/saml/acs") if request_data else "/saml/acs",
+            "server_port": request_data.get("server_port", "443") if request_data else "443",
+            "get_data": request_data.get("get_data", {}) if request_data else {},
+            "post_data": {"SAMLResponse": saml_response},
+        }
+
+        auth = OneLogin_Saml2_Auth(req, old_settings=settings_dict)
+        auth.process_response()
+
+        if not auth.is_authenticated():
+            return {
+                "valid": False,
+                "user_email": None,
+                "session_index": None,
+                "attributes": {},
+                "error": auth.get_last_error_reason(),
+            }
+
+        name_id = auth.get_nameid()
+        attributes = auth.get_attributes() or {}
+        session_index = auth.get_session_index()
+        user_email = name_id if (name_id and "@" in name_id) else None
+
+        return {
+            "valid": True,
+            "user_email": user_email,
+            "session_index": session_index,
+            "attributes": attributes,
+            "error": None,
+        }
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────

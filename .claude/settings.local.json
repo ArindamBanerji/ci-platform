@@ -24,7 +24,9 @@
       "Bash(python -m pytest tests/ -q --timeout=60)",
       "Bash(python -c ':*)",
       "Skill(codex:rescue)",
-      "Bash(python -m pytest tests/test_graph_backend_switcher.py tests/test_age_client.py -v)"
+      "Bash(python -m pytest tests/test_graph_backend_switcher.py tests/test_age_client.py -v)",
+      "Bash(python -m pytest tests/test_saml.py --timeout=60 -v)",
+      "Bash(python -m pytest tests/ --timeout=60 -v --ignore=tests/test_saml.py)"
     ]
   }
 }
