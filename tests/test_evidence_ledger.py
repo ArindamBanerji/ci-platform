@@ -1,7 +1,7 @@
 """Tests for the Evidence Ledger (hash-chained audit trail)."""
 import pytest
 
-from ci_platform.audit.evidence_ledger import EvidenceLedger, LedgerEntry
+from ci_platform.audit.evidence_ledger import EvidenceLedger, LedgerEntry, OutcomeEntry
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -142,3 +142,94 @@ def test_mixed_entries_chain_verifies():
         conservation_status="calibrating",
     ))
     assert ledger.verify_chain() is True
+
+
+# ── OutcomeEntry / dual-entry chain ───────────────────────────────────────────
+
+def test_outcome_entry_appended_to_chain():
+    ledger = EvidenceLedger()
+    entry = ledger.append(
+        decision_id="DEC-001", timestamp="2026-04-21T00:00:00",
+        alert_id="ALT-001", factor_breakdown={},
+        action="escalate", confidence=0.85,
+        outcome="pending", analyst_override=False,
+        centroid_state_hash="abc123", kernel_type="diagonal",
+        noise_zone="low", conservation_status="GREEN"
+    )
+    outcome = ledger.append_outcome(
+        decision_id="DEC-001",
+        decision_entry_hash=entry.entry_hash,
+        outcome="correct",
+        analyst_override=False,
+    )
+    assert len(ledger.entries()) == 2
+    assert isinstance(ledger.entries()[0], LedgerEntry)
+    assert isinstance(ledger.entries()[1], OutcomeEntry)
+    assert outcome.decision_entry_hash == entry.entry_hash
+    assert ledger.verify_chain()
+
+
+def test_outcome_entry_tamper_detected():
+    ledger = EvidenceLedger()
+    entry = ledger.append(
+        decision_id="DEC-001", timestamp="2026-04-21T00:00:00",
+        alert_id="ALT-001", factor_breakdown={},
+        action="escalate", confidence=0.85,
+        outcome="pending", analyst_override=False,
+        centroid_state_hash="abc123", kernel_type="diagonal",
+        noise_zone="low", conservation_status="GREEN"
+    )
+    outcome = ledger.append_outcome(
+        decision_id="DEC-001",
+        decision_entry_hash=entry.entry_hash,
+        outcome="correct",
+        analyst_override=False,
+    )
+    outcome.outcome = "incorrect"
+    assert not outcome.is_valid()
+    assert not ledger.verify_chain()
+
+
+def test_chain_index_monotonic():
+    ledger = EvidenceLedger()
+    e1 = ledger.append(
+        decision_id="DEC-001", timestamp="2026-04-21T00:00:00",
+        alert_id="ALT-001", factor_breakdown={},
+        action="escalate", confidence=0.85,
+        outcome="pending", analyst_override=False,
+        centroid_state_hash="abc", kernel_type="diagonal",
+        noise_zone="low", conservation_status="GREEN"
+    )
+    o1 = ledger.append_outcome(
+        decision_id="DEC-001",
+        decision_entry_hash=e1.entry_hash,
+        outcome="correct", analyst_override=False,
+    )
+    e2 = ledger.append(
+        decision_id="DEC-002", timestamp="2026-04-21T00:00:00",
+        alert_id="ALT-002", factor_breakdown={},
+        action="investigate", confidence=0.7,
+        outcome="pending", analyst_override=False,
+        centroid_state_hash="def", kernel_type="diagonal",
+        noise_zone="low", conservation_status="GREEN"
+    )
+    assert e1.chain_index == 0
+    assert o1.chain_index == 1
+    assert e2.chain_index == 2
+    assert ledger.verify_chain()
+
+
+def test_decision_hash_excludes_outcome():
+    """Mutating outcome on a sealed LedgerEntry should NOT break is_valid()
+    because outcome is no longer in the hash."""
+    ledger = EvidenceLedger()
+    entry = ledger.append(
+        decision_id="DEC-001", timestamp="2026-04-21T00:00:00",
+        alert_id="ALT-001", factor_breakdown={},
+        action="escalate", confidence=0.85,
+        outcome="pending", analyst_override=False,
+        centroid_state_hash="abc", kernel_type="diagonal",
+        noise_zone="low", conservation_status="GREEN"
+    )
+    entry.outcome = "correct"
+    assert entry.is_valid()  # outcome not in hash
