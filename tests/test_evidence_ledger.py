@@ -233,3 +233,93 @@ def test_decision_hash_excludes_outcome():
     )
     entry.outcome = "correct"
     assert entry.is_valid()  # outcome not in hash
+
+
+def test_decision_hash_excludes_analyst_override():
+    """Mutating analyst_override on a sealed LedgerEntry should NOT break is_valid()."""
+    ledger = EvidenceLedger()
+    entry = ledger.append(
+        decision_id="DEC-001", timestamp="2026-04-21",
+        alert_id="ALT-001", factor_breakdown={},
+        action="escalate", confidence=0.85,
+        outcome="pending", analyst_override=False,
+        centroid_state_hash="abc", kernel_type="diagonal",
+        noise_zone="low", conservation_status="GREEN"
+    )
+    entry.analyst_override = True
+    assert entry.is_valid()
+
+
+def test_append_outcome_on_empty_ledger_raises():
+    """Cannot append an outcome to an empty ledger — there's no decision to link to."""
+    ledger = EvidenceLedger()
+    with pytest.raises(ValueError, match="does not match"):
+        ledger.append_outcome(
+            decision_id="DEC-001",
+            decision_entry_hash="nonexistent_hash",
+            outcome="correct",
+            analyst_override=False,
+        )
+
+
+def test_append_outcome_rejects_unknown_hash():
+    """append_outcome with a hash that doesn't match any LedgerEntry raises ValueError."""
+    ledger = EvidenceLedger()
+    ledger.append(
+        decision_id="DEC-001", timestamp="2026-04-21",
+        alert_id="ALT-001", factor_breakdown={},
+        action="escalate", confidence=0.85,
+        outcome="pending", analyst_override=False,
+        centroid_state_hash="abc", kernel_type="diagonal",
+        noise_zone="low", conservation_status="GREEN"
+    )
+    with pytest.raises(ValueError, match="does not match"):
+        ledger.append_outcome(
+            decision_id="DEC-001",
+            decision_entry_hash="wrong_hash_value",
+            outcome="correct",
+            analyst_override=False,
+        )
+
+
+def test_multiple_outcomes_for_same_decision():
+    """Multiple outcomes for the same decision_id are allowed (event sourcing)."""
+    ledger = EvidenceLedger()
+    entry = ledger.append(
+        decision_id="DEC-001", timestamp="2026-04-21",
+        alert_id="ALT-001", factor_breakdown={},
+        action="escalate", confidence=0.85,
+        outcome="pending", analyst_override=False,
+        centroid_state_hash="abc", kernel_type="diagonal",
+        noise_zone="low", conservation_status="GREEN"
+    )
+    o1 = ledger.append_outcome(
+        decision_id="DEC-001",
+        decision_entry_hash=entry.entry_hash,
+        outcome="correct", analyst_override=False,
+    )
+    o2 = ledger.append_outcome(
+        decision_id="DEC-001",
+        decision_entry_hash=entry.entry_hash,
+        outcome="incorrect", analyst_override=True,
+    )
+    assert len(ledger.entries()) == 3
+    assert o1.chain_index == 1
+    assert o2.chain_index == 2
+    assert ledger.verify_chain()
+
+
+def test_verify_chain_detects_chain_index_tampering():
+    """Mutating chain_index on a sealed entry should break is_valid()."""
+    ledger = EvidenceLedger()
+    entry = ledger.append(
+        decision_id="DEC-001", timestamp="2026-04-21",
+        alert_id="ALT-001", factor_breakdown={},
+        action="escalate", confidence=0.85,
+        outcome="pending", analyst_override=False,
+        centroid_state_hash="abc", kernel_type="diagonal",
+        noise_zone="low", conservation_status="GREEN"
+    )
+    entry.chain_index = 99
+    assert not entry.is_valid()
+    assert not ledger.verify_chain()

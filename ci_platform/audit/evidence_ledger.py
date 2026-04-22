@@ -189,8 +189,19 @@ class EvidenceLedger:
         analyst_override: bool = False,
         timestamp: Optional[str] = None,
     ) -> OutcomeEntry:
-        """Append an outcome verification event to the chain."""
-        prev_hash = self._entries[-1].entry_hash if self._entries else ""
+        """Append an outcome verification event to the chain.
+
+        Multiple outcomes for the same decision_id are allowed
+        (event sourcing). Consumers should use the LATEST outcome
+        per decision_id when computing q or other metrics.
+        """
+        prev_hash = self._entries[-1].entry_hash if self._entries else "0" * 64
+        known_hashes = {e.entry_hash for e in self._entries if isinstance(e, LedgerEntry)}
+        if decision_entry_hash not in known_hashes:
+            raise ValueError(
+                f"decision_entry_hash {decision_entry_hash[:16]}... "
+                f"does not match any sealed LedgerEntry in the chain"
+            )
         ts = timestamp or datetime.now(timezone.utc).isoformat()
         entry = OutcomeEntry(
             chain_index=len(self._entries),
