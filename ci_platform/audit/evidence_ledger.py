@@ -18,6 +18,7 @@ DecisionEntry via decision_entry_hash.
 
 import hashlib
 import json
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Union
@@ -140,6 +141,7 @@ class EvidenceLedger:
 
     def __init__(self) -> None:
         self._entries: List[Union[LedgerEntry, OutcomeEntry]] = []
+        self._lock = threading.Lock()
 
     # ── public API ─────────────────────────────────────────────────────────
 
@@ -159,27 +161,28 @@ class EvidenceLedger:
         conservation_status: Optional[str] = None,
     ) -> LedgerEntry:
         """Append a new decision entry. Returns the sealed LedgerEntry."""
-        prev_hash = self._entries[-1].entry_hash if self._entries else "0" * 64
-        ts = timestamp or datetime.now(timezone.utc).isoformat()
-        entry = LedgerEntry(
-            decision_id=decision_id,
-            timestamp=ts,
-            alert_id=alert_id,
-            factor_breakdown=factor_breakdown,
-            action=action,
-            confidence=confidence,
-            outcome=outcome,
-            analyst_override=analyst_override,
-            centroid_state_hash=centroid_state_hash,
-            prev_hash=prev_hash,
-            kernel_type=kernel_type,
-            noise_zone=noise_zone,
-            conservation_status=conservation_status,
-        )
-        entry.chain_index = len(self._entries)
-        entry.seal()
-        self._entries.append(entry)
-        return entry
+        with self._lock:
+            prev_hash = self._entries[-1].entry_hash if self._entries else "0" * 64
+            ts = timestamp or datetime.now(timezone.utc).isoformat()
+            entry = LedgerEntry(
+                decision_id=decision_id,
+                timestamp=ts,
+                alert_id=alert_id,
+                factor_breakdown=factor_breakdown,
+                action=action,
+                confidence=confidence,
+                outcome=outcome,
+                analyst_override=analyst_override,
+                centroid_state_hash=centroid_state_hash,
+                prev_hash=prev_hash,
+                kernel_type=kernel_type,
+                noise_zone=noise_zone,
+                conservation_status=conservation_status,
+            )
+            entry.chain_index = len(self._entries)
+            entry.seal()
+            self._entries.append(entry)
+            return entry
 
     def append_outcome(
         self,
@@ -195,26 +198,27 @@ class EvidenceLedger:
         (event sourcing). Consumers should use the LATEST outcome
         per decision_id when computing q or other metrics.
         """
-        prev_hash = self._entries[-1].entry_hash if self._entries else "0" * 64
-        known_hashes = {e.entry_hash for e in self._entries if isinstance(e, LedgerEntry)}
-        if decision_entry_hash not in known_hashes:
-            raise ValueError(
-                f"decision_entry_hash {decision_entry_hash[:16]}... "
-                f"does not match any sealed LedgerEntry in the chain"
+        with self._lock:
+            prev_hash = self._entries[-1].entry_hash if self._entries else "0" * 64
+            known_hashes = {e.entry_hash for e in self._entries if isinstance(e, LedgerEntry)}
+            if decision_entry_hash not in known_hashes:
+                raise ValueError(
+                    f"decision_entry_hash {decision_entry_hash[:16]}... "
+                    f"does not match any sealed LedgerEntry in the chain"
+                )
+            ts = timestamp or datetime.now(timezone.utc).isoformat()
+            entry = OutcomeEntry(
+                chain_index=len(self._entries),
+                decision_id=decision_id,
+                decision_entry_hash=decision_entry_hash,
+                outcome=outcome,
+                analyst_override=analyst_override,
+                timestamp=ts,
+                prev_hash=prev_hash,
             )
-        ts = timestamp or datetime.now(timezone.utc).isoformat()
-        entry = OutcomeEntry(
-            chain_index=len(self._entries),
-            decision_id=decision_id,
-            decision_entry_hash=decision_entry_hash,
-            outcome=outcome,
-            analyst_override=analyst_override,
-            timestamp=ts,
-            prev_hash=prev_hash,
-        )
-        entry.seal()
-        self._entries.append(entry)
-        return entry
+            entry.seal()
+            self._entries.append(entry)
+            return entry
 
     def verify_chain(self) -> bool:
         """Verify chain integrity: every entry is internally valid and prev_hash links are unbroken."""
