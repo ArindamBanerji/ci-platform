@@ -7,5 +7,6 @@ Usage (SOC, S2P, any future copilot):
     results = await graph.run_query("MATCH (n:Alert) RETURN n", {})
 """
 from ci_platform.graph.age_client import AGEClient, get_graph_client
+from ci_platform.graph.age_graph_store import AGEGraphStore
 
-__all__ = ["AGEClient", "get_graph_client"]
+__all__ = ["AGEClient", "AGEGraphStore", "get_graph_client"]

@@ -212,6 +212,10 @@ class AGEClient:
             return f"'{escaped}'"
         return f"'{json.dumps(value)}'"
 
+    def _S(self, value: Any) -> str:
+        """Canonical helper for direct AGE Cypher string interpolation."""
+        return AGEClient.serialize_for_age(value)
+
     # ── query building ────────────────────────────────────────────────────────
 
     def _extract_columns(self, cypher: str) -> List[str]:
