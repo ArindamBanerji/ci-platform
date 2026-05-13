@@ -6,6 +6,7 @@ import asyncio
 import json
 import threading
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ci_platform.graph.age_client import AGEClient
@@ -201,6 +202,51 @@ class AGEGraphStore:
     def get_all_decisions(self) -> List[Dict[str, Any]]:
         return self.get_decisions()
 
+    def save_centroids(
+        self,
+        decision_id: str,
+        category: str,
+        centroids: Any,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if hasattr(centroids, "tolist"):
+            centroids = centroids.tolist()
+        centroids_json = json.dumps(centroids, sort_keys=True)
+        metadata_json = json.dumps(metadata or {}, sort_keys=True)
+        created_at = datetime.now(timezone.utc).isoformat()
+        props = (
+            "{"
+            f"decision_id: {self._S(decision_id)}, "
+            f"category: {self._S(category)}, "
+            f"centroids: {self._S(centroids_json)}, "
+            f"metadata: {self._S(metadata_json)}, "
+            f"created_at: {self._S(created_at)}"
+            "}"
+        )
+        query = f"""
+        MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
+        WITH d LIMIT 1
+        CREATE (c:CentroidCheckpoint {props})
+        CREATE (d)-[:HAS_CENTROID_CHECKPOINT]->(c)
+        RETURN c
+        """
+        rows = self._run_query(query)
+        if not rows:
+            self._run_query(f"CREATE (c:CentroidCheckpoint {props}) RETURN c")
+
+    def get_centroid_checkpoints(self, limit: int = 50) -> List[Dict[str, Any]]:
+        limit_value = self._safe_limit(limit, default=50)
+        rows = self._run_query(
+            f"""
+            MATCH (c:CentroidCheckpoint)
+            RETURN c
+            ORDER BY c.created_at DESC
+            LIMIT {limit_value}
+            """
+        )
+        checkpoints = [self._node_to_dict(row.get("c", row)) for row in rows]
+        return list(reversed(checkpoints))
+
     def query_context(self, entity_id: str, hops: int = 2) -> List[Dict[str, Any]]:
         hop_count = self._safe_hops(hops)
         rows = self._run_query(
@@ -243,12 +289,13 @@ class AGEGraphStore:
                 node = self._node_to_dict(next(iter(value.values())))
             else:
                 node = dict(value)
-            for key in ("factors", "metadata"):
+            for key in ("factors", "metadata", "centroids"):
                 if isinstance(node.get(key), str):
                     try:
                         node[key] = json.loads(node[key])
                     except json.JSONDecodeError:
-                        pass
+                        if key == "metadata":
+                            node[key] = {}
             return node
         if isinstance(value, str):
             try:

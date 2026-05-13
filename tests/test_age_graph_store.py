@@ -67,11 +67,20 @@ def test_age_graph_store_has_graphstore_methods():
         "count_verified",
         "count_correct",
         "get_all_decisions",
+        "save_centroids",
+        "get_centroid_checkpoints",
         "close",
         "query_context",
         "query_similar",
     ]:
         assert hasattr(AGEGraphStore, name)
+
+
+def test_age_graph_store_has_centroid_methods():
+    from ci_platform.graph import AGEGraphStore
+
+    assert hasattr(AGEGraphStore, "save_centroids")
+    assert hasattr(AGEGraphStore, "get_centroid_checkpoints")
 
 
 def test_age_client_exposes_s_helper():
@@ -255,6 +264,127 @@ def test_count_methods_parse_ints(fake_age_client):
 
     assert store.count_verified() == 2
     assert store.count_correct() == 1
+
+
+def test_save_centroids_creates_node(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    store.save_centroids(
+        "DEC-1",
+        "duplicate_risk",
+        [[0.1, 0.2], [0.3, 0.4]],
+        metadata={"iks": 0.42},
+    )
+
+    query, parameters = FakeAGEClient.instances[0].queries[0]
+    assert parameters is None
+    assert "CentroidCheckpoint" in query
+    assert "HAS_CENTROID_CHECKPOINT" in query
+    assert "$" not in query
+    assert "ON CREATE SET" not in query
+    assert "MERGE" not in query
+    assert "DEC-1" in query
+    assert "duplicate_risk" in query
+    assert "0.42" in query
+
+
+def test_save_centroids_without_metadata(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    store.save_centroids("DEC-1", "price_variance", [[0.5]])
+
+    query = FakeAGEClient.instances[0].queries[0][0]
+    assert "CentroidCheckpoint" in query
+    assert "{}" in query
+
+
+def test_save_centroids_handles_numpy_like(fake_age_client):
+    class ArrayLike:
+        def tolist(self):
+            return [[0.1, 0.2]]
+
+    store = _new_store(fake_age_client)
+
+    store.save_centroids("DEC-1", "duplicate_risk", ArrayLike())
+
+    calls = FakeAGEClient.instances[0].s_calls
+    assert any("[[0.1, 0.2]]" in str(value) for value in calls)
+
+
+def test_get_centroid_checkpoints_returns_list(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append(
+        [
+            {
+                "c": {
+                    "properties": {
+                        "decision_id": "DEC-2",
+                        "category": "price_variance",
+                        "centroids": "[[0.3, 0.4]]",
+                        "metadata": '{"iks": 0.6}',
+                        "created_at": "2026-01-02T00:00:00+00:00",
+                    }
+                }
+            },
+            {
+                "c": {
+                    "properties": {
+                        "decision_id": "DEC-1",
+                        "category": "duplicate_risk",
+                        "centroids": "[[0.1, 0.2]]",
+                        "metadata": '{"iks": 0.4}',
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                    }
+                }
+            },
+        ]
+    )
+
+    checkpoints = store.get_centroid_checkpoints(limit=2)
+
+    assert [checkpoint["decision_id"] for checkpoint in checkpoints] == ["DEC-1", "DEC-2"]
+    assert checkpoints[0]["centroids"] == [[0.1, 0.2]]
+    assert checkpoints[0]["metadata"] == {"iks": 0.4}
+
+
+def test_get_centroid_checkpoints_limit_clamped(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    store.get_centroid_checkpoints(limit=-1)
+    store.get_centroid_checkpoints(limit=2000)
+
+    queries = "\n".join(query for query, _ in FakeAGEClient.instances[0].queries)
+    assert "LIMIT -1" not in queries
+    assert "LIMIT 2000" not in queries
+    assert "LIMIT 1" in queries
+    assert "LIMIT 1000" in queries
+
+
+def test_get_centroid_checkpoints_parses_json_strings(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append(
+        [
+            {
+                "c": {
+                    "decision_id": "DEC-1",
+                    "category": "duplicate_risk",
+                    "centroids": "[[0.7]]",
+                    "metadata": "not-json",
+                }
+            }
+        ]
+    )
+
+    checkpoints = store.get_centroid_checkpoints()
+
+    assert checkpoints == [
+        {
+            "decision_id": "DEC-1",
+            "category": "duplicate_risk",
+            "centroids": [[0.7]],
+            "metadata": {},
+        }
+    ]
 
 
 def test_close_swallows_exceptions(fake_age_client, monkeypatch):
