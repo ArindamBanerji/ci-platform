@@ -8,5 +8,6 @@ Usage (SOC, S2P, any future copilot):
 """
 from ci_platform.graph.age_client import AGEClient, get_graph_client
 from ci_platform.graph.age_graph_store import AGEGraphStore
+from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
 
-__all__ = ["AGEClient", "AGEGraphStore", "get_graph_client"]
+__all__ = ["AGEClient", "AGEGraphStore", "AGEGraphStoreAdapter", "get_graph_client"]

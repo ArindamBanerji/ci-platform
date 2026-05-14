@@ -1,5 +1,6 @@
 import os
 import re
+import inspect
 
 import pytest
 
@@ -69,6 +70,7 @@ def test_age_graph_store_has_graphstore_methods():
         "get_all_decisions",
         "save_centroids",
         "get_centroid_checkpoints",
+        "save_evolution_event",
         "close",
         "query_context",
         "query_similar",
@@ -81,6 +83,55 @@ def test_age_graph_store_has_centroid_methods():
 
     assert hasattr(AGEGraphStore, "save_centroids")
     assert hasattr(AGEGraphStore, "get_centroid_checkpoints")
+
+
+def test_save_evolution_event_method_exists():
+    from ci_platform.graph import AGEGraphStore
+
+    assert hasattr(AGEGraphStore, "save_evolution_event")
+
+
+def test_save_evolution_event_signature():
+    pytest.importorskip("copilot_sdk.graph")
+    from ci_platform.graph import AGEGraphStore
+    from copilot_sdk.graph import GraphStore
+
+    protocol_signature = inspect.signature(GraphStore.save_evolution_event)
+    age_signature = inspect.signature(AGEGraphStore.save_evolution_event)
+
+    assert list(age_signature.parameters) == list(protocol_signature.parameters)
+    for name, parameter in protocol_signature.parameters.items():
+        assert age_signature.parameters[name].default == parameter.default
+
+
+def test_all_protocol_methods_present():
+    pytest.importorskip("copilot_sdk.graph")
+    from ci_platform.graph import AGEGraphStore
+    from copilot_sdk.graph import GraphStore
+
+    protocol_methods = [
+        name for name in dir(GraphStore) if not name.startswith("_")
+    ]
+
+    missing = [name for name in protocol_methods if not hasattr(AGEGraphStore, name)]
+    assert missing == []
+
+
+def test_protocol_method_signatures_match():
+    pytest.importorskip("copilot_sdk.graph")
+    from ci_platform.graph import AGEGraphStore
+    from copilot_sdk.graph import GraphStore
+
+    protocol_methods = [
+        name for name in dir(GraphStore) if not name.startswith("_")
+    ]
+
+    for method_name in protocol_methods:
+        protocol_signature = inspect.signature(getattr(GraphStore, method_name))
+        age_signature = inspect.signature(getattr(AGEGraphStore, method_name))
+        assert list(age_signature.parameters) == list(protocol_signature.parameters)
+        for name, parameter in protocol_signature.parameters.items():
+            assert age_signature.parameters[name].default == parameter.default
 
 
 def test_age_client_exposes_s_helper():
@@ -311,6 +362,43 @@ def test_save_centroids_handles_numpy_like(fake_age_client):
     assert any("[[0.1, 0.2]]" in str(value) for value in calls)
 
 
+def test_save_evolution_event_creates_node(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    store.save_evolution_event(
+        "variant_generated",
+        "threshold_rule",
+        "variant-1",
+        metadata={"seed": 42},
+    )
+
+    query, parameters = FakeAGEClient.instances[0].queries[0]
+    assert parameters is None
+    assert "EvolutionEvent" in query
+    assert "event_type" in query
+    assert "variant_generated" in query
+    assert "rule_name" in query
+    assert "threshold_rule" in query
+    assert "variant_id" in query
+    assert "variant-1" in query
+    assert "metadata" in query
+    assert "seed" in query
+    assert "timestamp" in query
+    assert "$" not in query
+    assert "ON CREATE SET" not in query
+    assert "MERGE" not in query
+
+
+def test_save_evolution_event_without_metadata(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    store.save_evolution_event("rejected", "factor_rule", "variant-2")
+
+    query = FakeAGEClient.instances[0].queries[0][0]
+    assert "EvolutionEvent" in query
+    assert "{}" in query
+
+
 def test_get_centroid_checkpoints_returns_list(fake_age_client):
     store = _new_store(fake_age_client)
     FakeAGEClient.instances[0].responses.append(
@@ -430,4 +518,17 @@ class TestAGEGraphStoreLive:
         store.write_outcome(decision_id, "hold_for_review", True)
         assert store.count_verified() >= 1
         assert store.count_correct() >= 1
+        store.close()
+
+    def test_live_save_evolution_event_no_crash(self):
+        from ci_platform.graph import AGEGraphStore
+
+        store = AGEGraphStore(dsn=GRAPH_DSN, graph_name="test_graph")
+        store.save_evolution_event(
+            "variant_generated",
+            "threshold_rule",
+            "variant-live",
+            metadata={"source": "live-test"},
+        )
+        store.save_evolution_event("rejected", "factor_rule", "variant-live-empty")
         store.close()

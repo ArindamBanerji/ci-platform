@@ -234,6 +234,26 @@ class AGEGraphStore:
         if not rows:
             self._run_query(f"CREATE (c:CentroidCheckpoint {props}) RETURN c")
 
+    def save_evolution_event(
+        self,
+        event_type: str,
+        rule_name: str,
+        variant_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        metadata_json = json.dumps(metadata or {}, sort_keys=True)
+        timestamp = datetime.now(timezone.utc).isoformat()
+        props = (
+            "{"
+            f"event_type: {self._S(event_type)}, "
+            f"rule_name: {self._S(rule_name)}, "
+            f"variant_id: {self._S(variant_id)}, "
+            f"metadata: {self._S(metadata_json)}, "
+            f"timestamp: {self._S(timestamp)}"
+            "}"
+        )
+        self._run_query(f"CREATE (e:EvolutionEvent {props}) RETURN e")
+
     def get_centroid_checkpoints(self, limit: int = 50) -> List[Dict[str, Any]]:
         limit_value = self._safe_limit(limit, default=50)
         rows = self._run_query(
