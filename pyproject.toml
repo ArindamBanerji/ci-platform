@@ -21,3 +21,32 @@ env = [
     "DATABASE_URL=postgresql://postgres:postgres@localhost:5433/soc_copilot",
     "AGE_GRAPH_NAME=soc_graph",
 ]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_return_any = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "ci_platform",
+    "ci_platform.enrichment.*",
+    "ci_platform.scripts.*",
+    "ci_platform.strategy.*",
+]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "ci_platform.auth.*",
+    "ci_platform.connectors.*",
+    "ci_platform.graph.*",
+    "ci_platform.onboarding.*",
+]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["psycopg.*"]
+follow_imports = "skip"
