@@ -71,6 +71,19 @@ class FakeGraphStore:
     def save_evolution_event(self, event_type, rule_name, variant_id, metadata=None):
         self.calls.append(("save_evolution_event", event_type, rule_name, variant_id, metadata))
 
+    def link_decision_to_entity(self, decision_id, entity_id, edge_type="DECIDED_ON"):
+        self.calls.append(("link_decision_to_entity", decision_id, entity_id, edge_type))
+
+    def get_decision_links(self, decision_id=None):
+        self.calls.append(("get_decision_links", decision_id))
+        return [
+            {
+                "decision_id": decision_id or "DEC-1",
+                "entity_id": "ENT-1",
+                "edge_type": "DECIDED_ON",
+            }
+        ]
+
     def close(self):
         self.calls.append(("close",))
         self.closed = True
@@ -211,6 +224,26 @@ def test_adapter_delegates_centroids_and_evolution_events():
         "variant-1",
         {"seed": 42},
     ) in store.calls
+
+
+def test_adapter_delegates_decision_entity_links():
+    from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
+
+    store = FakeGraphStore()
+    adapter = AGEGraphStoreAdapter(store=store)
+
+    adapter.link_decision_to_entity("DEC-1", "ENT-1", edge_type="REVIEWS")
+    links = adapter.get_decision_links("DEC-1")
+
+    assert ("link_decision_to_entity", "DEC-1", "ENT-1", "REVIEWS") in store.calls
+    assert ("get_decision_links", "DEC-1") in store.calls
+    assert links == [
+        {
+            "decision_id": "DEC-1",
+            "entity_id": "ENT-1",
+            "edge_type": "DECIDED_ON",
+        }
+    ]
 
 
 def test_adapter_close_delegates_to_store():

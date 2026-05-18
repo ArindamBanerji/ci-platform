@@ -71,6 +71,8 @@ def test_age_graph_store_has_graphstore_methods():
         "save_centroids",
         "get_centroid_checkpoints",
         "save_evolution_event",
+        "link_decision_to_entity",
+        "get_decision_links",
         "close",
         "query_context",
         "query_similar",
@@ -397,6 +399,93 @@ def test_save_evolution_event_without_metadata(fake_age_client):
     query = FakeAGEClient.instances[0].queries[0][0]
     assert "EvolutionEvent" in query
     assert "{}" in query
+
+
+def test_link_decision_to_entity_creates_relationship_when_entity_exists(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append([{"d": {"decision_id": "DEC-1"}}])
+
+    store.link_decision_to_entity("DEC-1", "ENT-1")
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    assert len(queries) == 1
+    assert "MATCH (d:Decision {decision_id:" in queries[0]
+    assert "MATCH (e {entity_id:" in queries[0]
+    assert "CREATE (d)-[:DECIDED_ON" in queries[0]
+    assert "DecisionEntityLink" not in queries[0]
+    assert "$" not in queries[0]
+    assert "MERGE" not in queries[0]
+
+
+def test_link_decision_to_entity_falls_back_to_link_node(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    store.link_decision_to_entity("DEC-1", "ENT-1", edge_type="REVIEWS")
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    assert len(queries) == 2
+    assert "CREATE (d)-[:REVIEWS" in queries[0]
+    assert "CREATE (l:DecisionEntityLink" in queries[1]
+    assert "REVIEWS" in queries[1]
+    assert "$" not in queries[1]
+    assert "MERGE" not in queries[1]
+
+
+def test_link_decision_to_entity_rejects_unsafe_edge_type(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    with pytest.raises(ValueError, match="Invalid edge_type"):
+        store.link_decision_to_entity("DEC-1", "ENT-1", edge_type="BAD EDGE")
+
+
+def test_get_decision_links_reads_relationships_and_link_nodes(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.extend(
+        [
+            [
+                {
+                    "decision_id": "DEC-1",
+                    "entity_id": "ENT-1",
+                    "edge_type": "DECIDED_ON",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                }
+            ],
+            [
+                {
+                    "l": {
+                        "properties": {
+                            "decision_id": "DEC-2",
+                            "entity_id": "ENT-2",
+                            "edge_type": "REVIEWS",
+                            "created_at": "2026-01-02T00:00:00+00:00",
+                        }
+                    }
+                }
+            ],
+        ]
+    )
+
+    links = store.get_decision_links("DEC-1")
+
+    assert links == [
+        {
+            "decision_id": "DEC-1",
+            "entity_id": "ENT-1",
+            "edge_type": "DECIDED_ON",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        },
+        {
+            "decision_id": "DEC-2",
+            "entity_id": "ENT-2",
+            "edge_type": "REVIEWS",
+            "created_at": "2026-01-02T00:00:00+00:00",
+        },
+    ]
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    assert "WHERE d.decision_id = 'DEC-1'" in queries[0]
+    assert "WHERE l.decision_id = 'DEC-1'" in queries[1]
+    assert "$" not in "\n".join(queries)
+    assert "MERGE" not in "\n".join(queries)
 
 
 def test_get_centroid_checkpoints_returns_list(fake_age_client):

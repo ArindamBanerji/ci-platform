@@ -8,7 +8,7 @@ from ci_platform.graph.age_graph_store import AGEGraphStore
 
 
 class AGEGraphStoreAdapter:
-    """Thin SDK GraphStore-compatible wrapper around AGEGraphStore."""
+    """Transitional SDK GraphStore-compatible wrapper around AGEGraphStore."""
 
     def __init__(
         self,
@@ -106,6 +106,21 @@ class AGEGraphStoreAdapter:
             variant_id=variant_id,
             metadata=metadata,
         )
+
+    def link_decision_to_entity(
+        self,
+        decision_id: str,
+        entity_id: str,
+        edge_type: str = "DECIDED_ON",
+    ) -> None:
+        self._store.link_decision_to_entity(
+            decision_id=decision_id,
+            entity_id=entity_id,
+            edge_type=edge_type,
+        )
+
+    def get_decision_links(self, decision_id: str | None = None) -> list[dict[str, Any]]:
+        return self._store.get_decision_links(decision_id=decision_id)
 
     def close(self) -> None:
         self._store.close()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -253,6 +254,110 @@ class AGEGraphStore:
             "}"
         )
         self._run_query(f"CREATE (e:EvolutionEvent {props}) RETURN e")
+
+    def link_decision_to_entity(
+        self,
+        decision_id: str,
+        entity_id: str,
+        edge_type: str = "DECIDED_ON",
+    ) -> None:
+        edge_label = self._safe_edge_type(edge_type)
+        created_at = datetime.now(timezone.utc).isoformat()
+        props = self._link_props(decision_id, entity_id, edge_label, created_at)
+        query = f"""
+        MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
+        MATCH (e {{entity_id: {self._S(entity_id)}}})
+        WITH d, e LIMIT 1
+        CREATE (d)-[:{edge_label} {{
+            decision_id: {self._S(decision_id)},
+            entity_id: {self._S(entity_id)},
+            edge_type: {self._S(edge_label)},
+            created_at: {self._S(created_at)}
+        }}]->(e)
+        RETURN d, e
+        """
+        rows = self._run_query(query)
+        if not rows:
+            self._run_query(f"CREATE (l:DecisionEntityLink {props}) RETURN l")
+
+    def get_decision_links(self, decision_id: str | None = None) -> List[Dict[str, Any]]:
+        where_relationship = (
+            f"WHERE d.decision_id = {self._S(decision_id)}"
+            if decision_id is not None
+            else ""
+        )
+        relationship_rows = self._run_query(
+            f"""
+            MATCH (d:Decision)-[r]->(e)
+            {where_relationship}
+            RETURN d.decision_id AS decision_id,
+                   e.entity_id AS entity_id,
+                   type(r) AS edge_type,
+                   r.created_at AS created_at
+            """
+        )
+        where_link = (
+            f"WHERE l.decision_id = {self._S(decision_id)}"
+            if decision_id is not None
+            else ""
+        )
+        link_rows = self._run_query(
+            f"""
+            MATCH (l:DecisionEntityLink)
+            {where_link}
+            RETURN l
+            """
+        )
+        return [
+            link
+            for row in [*relationship_rows, *link_rows]
+            if (link := self._link_row_to_dict(row))
+        ]
+
+    @staticmethod
+    def _safe_edge_type(edge_type: str) -> str:
+        value = str(edge_type or "DECIDED_ON").upper()
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", value):
+            raise ValueError(f"Invalid edge_type: {edge_type!r}")
+        return value
+
+    def _link_props(
+        self,
+        decision_id: str,
+        entity_id: str,
+        edge_type: str,
+        created_at: str,
+    ) -> str:
+        return (
+            "{"
+            f"decision_id: {self._S(decision_id)}, "
+            f"entity_id: {self._S(entity_id)}, "
+            f"edge_type: {self._S(edge_type)}, "
+            f"created_at: {self._S(created_at)}"
+            "}"
+        )
+
+    def _link_row_to_dict(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        link = self._node_to_dict(row.get("l", row))
+        decision_id = link.get("decision_id")
+        entity_id = link.get("entity_id")
+        edge_type = link.get("edge_type")
+        if not decision_id:
+            decision = self._node_to_dict(row.get("d"))
+            decision_id = decision.get("decision_id")
+        if not entity_id:
+            entity = self._node_to_dict(row.get("e"))
+            entity_id = entity.get("entity_id")
+        if not edge_type:
+            edge_type = row.get("edge_type") or "DECIDED_ON"
+        if not decision_id or not entity_id:
+            return {}
+        return {
+            "decision_id": str(decision_id),
+            "entity_id": str(entity_id),
+            "edge_type": str(edge_type),
+            "created_at": link.get("created_at") or row.get("created_at"),
+        }
 
     def get_centroid_checkpoints(self, limit: int = 50) -> List[Dict[str, Any]]:
         limit_value = self._safe_limit(limit, default=50)
