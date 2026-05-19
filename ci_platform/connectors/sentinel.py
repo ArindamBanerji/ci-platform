@@ -1,7 +1,7 @@
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, cast
 
 import httpx
 
@@ -126,7 +126,7 @@ class SentinelConnector(SourceConnectorProtocol):
     async def _get_token(self, scope: str) -> str:
         cached = self._token_cache.get(scope)
         if cached and cached["expires_at"] > time.time() + 60:
-            return cached["access_token"]
+            return cast(str, cached["access_token"])
 
         url = _TOKEN_URL.format(tenant_id=self._config.tenant_id)
         async with httpx.AsyncClient() as client:
@@ -147,7 +147,7 @@ class SentinelConnector(SourceConnectorProtocol):
             "access_token": payload["access_token"],
             "expires_at": time.time() + payload.get("expires_in", 3600),
         }
-        return payload["access_token"]
+        return cast(str, payload["access_token"])
 
     # ── helpers ───────────────────────────────────────────────────────────────
 

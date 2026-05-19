@@ -34,7 +34,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 import psycopg  # sync only — no AsyncConnection anywhere
 
@@ -190,7 +190,7 @@ class AGEClient:
         return value
 
     @staticmethod
-    def serialize_for_age(value):
+    def serialize_for_age(value: Any) -> str:
         """
         Serialize Python types for AGE Cypher parameter interpolation.
         Used in _sync_execute when building Cypher query strings.
@@ -314,7 +314,7 @@ class AGEClient:
         columns = self._extract_columns(query)
         sql = self._build_sql(query, columns)
 
-        rows = None
+        rows: Any = None
         MAX_RETRIES = 3
         for attempt in range(MAX_RETRIES):
             try:
@@ -339,7 +339,7 @@ class AGEClient:
                 raise
 
         results: List[Dict[str, Any]] = []
-        for row in rows:
+        for row in cast(List[Any], rows):
             row_dict: Dict[str, Any] = {}
             for i, col in enumerate(columns):
                 raw = row[i] if i < len(row) else None

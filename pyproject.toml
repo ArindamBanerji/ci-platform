@@ -40,9 +40,6 @@ disallow_incomplete_defs = true
 
 [[tool.mypy.overrides]]
 module = [
-    "ci_platform.auth.*",
-    "ci_platform.connectors.*",
-    "ci_platform.graph.*",
     "ci_platform.onboarding.*",
 ]
 ignore_errors = true

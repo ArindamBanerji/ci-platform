@@ -3,7 +3,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, Optional, cast
 from urllib.parse import urlencode
 
 from onelogin.saml2.auth import OneLogin_Saml2_Auth
@@ -102,7 +102,7 @@ class SAMLService:
         }
 
     def validate_response(self, saml_response: str,
-                          request_data: dict = None) -> Dict:
+                          request_data: Optional[dict] = None) -> Dict:
         """
         Validate a base64-encoded SAMLResponse.
 
@@ -132,7 +132,7 @@ class SAMLService:
                 "error": "IdP x509 cert required for SAML validation",
             }
         try:
-            return self._validate_with_python3_saml(saml_response, request_data)
+            return self._validate_with_python3_saml(saml_response, cast(dict, request_data))
         except Exception as exc:
             return {
                 "valid": False,
