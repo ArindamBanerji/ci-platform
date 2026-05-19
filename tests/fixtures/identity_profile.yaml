@@ -1,0 +1,33 @@
+profile_type: IdentityConnectorProfile
+tier: 1
+cadence: hourly
+entity_type_produced: User
+connection:
+  source_type: ldap
+  host: ldap.example.test
+  port: 636
+  bind_dn_env_var: LDAP_BIND_DN
+  bind_pw_env_var: LDAP_BIND_PW
+  base_dn: DC=corp,DC=com
+entity_mappings:
+  - source_field: sAMAccountName
+    target_property: id
+    required: true
+  - source_field: displayName
+    target_property: name
+    required: true
+  - source_field: department
+    target_property: department
+    required: true
+  - source_field: title
+    target_property: title
+    required: false
+  - source_field: manager
+    target_property: manager
+    transformer: dn_to_username
+    required: false
+  - source_field: memberOf
+    target_property: groups
+    transformer: dn_list_to_names
+    required: false
+semantic_registry_concept: identity_context

@@ -1,0 +1,17 @@
+[
+  {
+    "SupplierInvoice": "INV-5100098765",
+    "Supplier": "Aster Rubber",
+    "GrossAmount": 423500,
+    "Currency": "EUR",
+    "MatchStatus": "exception",
+    "ExceptionReason": "material_code_mismatch"
+  },
+  {
+    "SupplierInvoice": "INV-5100098766",
+    "Supplier": "Yokohama Materials",
+    "GrossAmount": 156000,
+    "Currency": "EUR",
+    "MatchStatus": "matched"
+  }
+]

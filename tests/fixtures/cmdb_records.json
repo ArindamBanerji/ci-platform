@@ -1,0 +1,21 @@
+[
+  {
+    "ci_id": "CI-001",
+    "ci_name": "db-prod-01",
+    "criticality_level": "CRITICAL",
+    "monitoring_status": "yes",
+    "owner_team": "DBA",
+    "data_classification": "confidential"
+  },
+  {
+    "ci_id": "CI-002",
+    "ci_name": "web-staging",
+    "criticality_level": "LOW"
+  },
+  {
+    "ci_id": "CI-003",
+    "ci_name": "api-gateway",
+    "criticality_level": "HIGH",
+    "monitoring_status": "no"
+  }
+]

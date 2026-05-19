@@ -1,0 +1,33 @@
+profile_type: CMDBConnectorProfile
+tier: 1
+cadence: daily
+entity_type_produced: Asset
+connection:
+  base_url: https://cmdb.example.test/api
+  auth_type: api_key
+  api_key_env_var: CMDB_API_KEY
+entity_mappings:
+  - source_field: ci_id
+    target_property: id
+    required: true
+  - source_field: ci_name
+    target_property: name
+    required: true
+  - source_field: criticality_level
+    target_property: criticality_score
+    transformer: cmdb_criticality_to_float
+    required: true
+  - source_field: monitoring_status
+    target_property: monitoring_active
+    transformer: yes_no_to_bool
+    required: false
+  - source_field: owner_team
+    target_property: owner
+    required: false
+  - source_field: data_classification
+    target_property: data_class
+    required: false
+semantic_registry_concept: critical_assets
+validation_query: |
+  MATCH (a:Asset) WHERE a.criticality_score IS NOT NULL
+  RETURN count(a) AS count

@@ -1,0 +1,86 @@
+{
+  "process_models": [
+    {
+      "id": "PM-001",
+      "name": "Purchase-to-Pay",
+      "case_count": 12450,
+      "variant_count": 2,
+      "source": "celonis_fixture",
+      "extracted_at": "2026-05-18T00:00:00Z"
+    }
+  ],
+  "variants": [
+    {
+      "id": "PV-001",
+      "process_model_id": "PM-001",
+      "frequency": 0.72,
+      "avg_duration": 345600,
+      "conformance_rate": 0.91,
+      "activity_ids": ["ACT-001", "ACT-002", "ACT-003", "ACT-004"]
+    },
+    {
+      "id": "PV-002",
+      "process_model_id": "PM-001",
+      "frequency": 0.28,
+      "avg_duration": 518400,
+      "conformance_rate": 0.67,
+      "activity_ids": ["ACT-001", "ACT-002", "ACT-003"]
+    }
+  ],
+  "activities": [
+    {
+      "id": "ACT-001",
+      "name": "Create Purchase Requisition",
+      "avg_duration": 3600,
+      "automation_rate": 0.45,
+      "rework_rate": 0.03
+    },
+    {
+      "id": "ACT-002",
+      "name": "Approve Purchase Order",
+      "avg_duration": 28800,
+      "automation_rate": 0.12,
+      "rework_rate": 0.08
+    },
+    {
+      "id": "ACT-003",
+      "name": "Match Invoice to GR",
+      "avg_duration": 2520,
+      "automation_rate": 0.65,
+      "rework_rate": 0.15
+    },
+    {
+      "id": "ACT-004",
+      "name": "Process Payment",
+      "avg_duration": 1800,
+      "automation_rate": 0.82,
+      "rework_rate": 0.02
+    }
+  ],
+  "transitions": [
+    {
+      "id": "TR-001",
+      "from_activity": "ACT-001",
+      "to_activity": "ACT-002",
+      "frequency": 8964,
+      "wait_time": 14400,
+      "conformance": 0.95
+    },
+    {
+      "id": "TR-002",
+      "from_activity": "ACT-002",
+      "to_activity": "ACT-003",
+      "frequency": 8240,
+      "wait_time": 43200,
+      "conformance": 0.88
+    },
+    {
+      "id": "TR-003",
+      "from_activity": "ACT-003",
+      "to_activity": "ACT-004",
+      "frequency": 7100,
+      "wait_time": 7200,
+      "conformance": 0.92
+    }
+  ]
+}

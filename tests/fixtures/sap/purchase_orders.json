@@ -1,0 +1,27 @@
+[
+  {
+    "PurchaseOrder": "PO-4500001234",
+    "Supplier": "Aster Rubber",
+    "NetAmount": 847000,
+    "Currency": "EUR",
+    "Plant": "Hanover",
+    "Status": "open",
+    "MaterialGroup": "MATKL_V2"
+  },
+  {
+    "PurchaseOrder": "PO-4500001235",
+    "Supplier": "Yokohama Materials",
+    "NetAmount": 312000,
+    "Currency": "EUR",
+    "Plant": "Timișoara",
+    "Status": "open"
+  },
+  {
+    "PurchaseOrder": "PO-4500001236",
+    "Supplier": "LANXESS Chemistry",
+    "NetAmount": 156000,
+    "Currency": "EUR",
+    "Plant": "Camaçari",
+    "Status": "approved"
+  }
+]

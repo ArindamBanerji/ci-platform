@@ -1,0 +1,21 @@
+[
+  {
+    "sAMAccountName": "jdoe",
+    "displayName": "Jane Doe",
+    "department": "Engineering",
+    "title": "Staff Engineer",
+    "manager": "CN=Bob Smith,OU=Users,DC=corp,DC=com",
+    "memberOf": "CN=Engineering,OU=Groups,DC=corp,DC=com;CN=VPN,OU=Groups,DC=corp,DC=com"
+  },
+  {
+    "sAMAccountName": "bsmith",
+    "displayName": "Bob Smith",
+    "department": "Engineering"
+  },
+  {
+    "sAMAccountName": "alee",
+    "displayName": "Alice Lee",
+    "department": "Security",
+    "manager": "CN=Jane Doe,OU=Users,DC=corp,DC=com"
+  }
+]

@@ -1,0 +1,11 @@
+{
+  "d": {
+    "PurchaseOrder": "PO-4500001234",
+    "__metadata": {
+      "type": "API_PURCHASEORDER_PROCESS_SRV.A_PurchaseOrderType"
+    },
+    "Status": "updated",
+    "MatchingParameter": "MATKL_V2_FILTER",
+    "LastChangedDateTime": "2026-05-19T10:00:00Z"
+  }
+}

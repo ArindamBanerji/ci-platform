@@ -1,0 +1,23 @@
+[
+  {
+    "BusinessPartner": "BP-0001000123",
+    "BusinessPartnerFullName": "Aster Rubber GmbH",
+    "SupplierAlias": "Aster Rubber",
+    "SupplierType": "tier1",
+    "PlantCodes": ["Hanover", "Mt Vernon", "Hefei"]
+  },
+  {
+    "BusinessPartner": "BP-0001000124",
+    "BusinessPartnerFullName": "Yokohama Materials Ltd",
+    "SupplierAlias": "Yokohama Materials",
+    "SupplierType": "tier1",
+    "PlantCodes": ["Timișoara", "Camaçari"]
+  },
+  {
+    "BusinessPartner": "BP-0001000125",
+    "BusinessPartnerFullName": "LANXESS Chemistry",
+    "SupplierAlias": "LANXESS Chemistry",
+    "SupplierType": "tier1",
+    "PlantCodes": ["Camaçari"]
+  }
+]
