@@ -24,7 +24,7 @@ class AGEGraphStoreAdapter:
 
     def write_decision(
         self,
-        entity_id: str,
+        domain: str,
         category: str,
         action: str,
         confidence: float,
@@ -32,7 +32,7 @@ class AGEGraphStoreAdapter:
         metadata: dict[str, Any] | None = None,
     ) -> str:
         return self._store.write_decision(
-            entity_id=entity_id,
+            domain=domain,
             category=category,
             action=action,
             confidence=confidence,
@@ -59,53 +59,73 @@ class AGEGraphStoreAdapter:
 
     def get_decisions(
         self,
+        domain: str,
         category: str | None = None,
         limit: int = 400,
     ) -> list[dict[str, Any]]:
-        return self._store.get_decisions(category=category, limit=limit)
+        return self._store.get_decisions(domain=domain, category=category, limit=limit)
 
-    def get_verified_decisions(self) -> list[dict[str, Any]]:
-        return self._store.get_verified_decisions()
+    def get_verified_decisions(self, domain: str) -> list[dict[str, Any]]:
+        return self._store.get_verified_decisions(domain)
 
-    def get_all_decisions(self) -> list[dict[str, Any]]:
-        return self._store.get_all_decisions()
+    def get_all_decisions(self, domain: str) -> list[dict[str, Any]]:
+        return self._store.get_all_decisions(domain)
 
-    def count_verified(self) -> int:
-        return self._store.count_verified()
+    def count_verified(self, domain: str) -> int:
+        return self._store.count_verified(domain)
 
-    def count_correct(self) -> int:
-        return self._store.count_correct()
+    def count_correct(self, domain: str) -> int:
+        return self._store.count_correct(domain)
+
+    def count_decisions(self, domain: str) -> int:
+        return self._store.count_decisions(domain)
 
     def save_centroids(
         self,
-        decision_id: str,
+        domain: str,
         category: str,
         centroids: Any,
         metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> None:
         self._store.save_centroids(
-            decision_id=decision_id,
+            domain=domain,
             category=category,
             centroids=centroids,
             metadata=metadata,
+            **kwargs,
         )
 
-    def get_centroid_checkpoints(self, limit: int = 50) -> list[dict[str, Any]]:
-        return self._store.get_centroid_checkpoints(limit=limit)
+    def load_latest_centroids(self, domain: str) -> Any | None:
+        return self._store.load_latest_centroids(domain)
+
+    def get_centroid_checkpoints(self, domain: str, **kwargs: Any) -> list[dict[str, Any]]:
+        return self._store.get_centroid_checkpoints(domain, **kwargs)
 
     def save_evolution_event(
         self,
+        domain: str,
         event_type: str,
-        rule_name: str,
-        variant_id: str,
+        rule_name: str = "",
+        variant_id: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> None:
         self._store.save_evolution_event(
+            domain=domain,
             event_type=event_type,
             rule_name=rule_name,
             variant_id=variant_id,
             metadata=metadata,
         )
+
+    def get_evolution_events(self, domain: str, **kwargs: Any) -> list[dict[str, Any]]:
+        return self._store.get_evolution_events(domain, **kwargs)
+
+    def archive_old_decisions(self, domain: str, keep_recent: int = 800) -> int:
+        return self._store.archive_old_decisions(domain, keep_recent=keep_recent)
+
+    def count_archived(self, domain: str) -> int:
+        return self._store.count_archived(domain)
 
     def link_decision_to_entity(
         self,

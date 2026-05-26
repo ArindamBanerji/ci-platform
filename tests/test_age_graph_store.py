@@ -67,10 +67,15 @@ def test_age_graph_store_has_graphstore_methods():
         "get_verified_decisions",
         "count_verified",
         "count_correct",
+        "count_decisions",
         "get_all_decisions",
         "save_centroids",
+        "load_latest_centroids",
         "get_centroid_checkpoints",
         "save_evolution_event",
+        "get_evolution_events",
+        "archive_old_decisions",
+        "count_archived",
         "link_decision_to_entity",
         "get_decision_links",
         "close",
@@ -190,7 +195,7 @@ def test_node_to_dict_handles_non_dict(fake_age_client):
 def test_query_limits_are_sanitized(fake_age_client):
     store = _new_store(fake_age_client)
 
-    store.get_decisions(limit=-1)
+    store.get_decisions("soc", limit=-1)
     store.query_context("ENT-1", hops=99)
     store.query_similar("DEC-1", limit=0)
 
@@ -205,12 +210,12 @@ def test_write_decision_uses_no_param_placeholders(fake_age_client):
     store = _new_store(fake_age_client)
 
     decision_id = store.write_decision(
-        entity_id="ENT-1",
+        "soc",
         category="duplicate_risk",
         action="flag_leakage",
         confidence=0.91,
         factors={"duplicate_score": 0.8},
-        metadata={"source": "unit"},
+        metadata={"source": "unit", "entity_id": "ENT-1"},
     )
 
     assert re.match(r"DEC-[0-9a-f]{8}", decision_id)
@@ -225,12 +230,12 @@ def test_age_graph_store_uses_client_s_directly(fake_age_client):
     store = _new_store(fake_age_client)
 
     store.write_decision(
-        entity_id="ENT-1",
+        "soc",
         category="duplicate_risk",
         action="flag_leakage",
         confidence=0.91,
         factors={"duplicate_score": 0.8},
-        metadata={"source": "unit"},
+        metadata={"source": "unit", "entity_id": "ENT-1"},
     )
 
     calls = FakeAGEClient.instances[0].s_calls
@@ -255,14 +260,14 @@ def test_age_graph_store_fails_if_client_missing_s(monkeypatch):
 
     store = AGEGraphStore(dsn="postgresql://example/test", graph_name="test_graph")
     with pytest.raises(AttributeError):
-        store.write_decision("ENT-1", "duplicate_risk", "flag_leakage", 0.9, {})
+        store.write_decision("soc", "duplicate_risk", "flag_leakage", 0.9, {})
 
 
 def test_write_decision_no_entity_falls_back_to_standalone(fake_age_client):
     store = _new_store(fake_age_client)
 
     store.write_decision(
-        "missing-entity",
+        "soc",
         "price_variance",
         "hold_for_review",
         0.7,
@@ -270,17 +275,24 @@ def test_write_decision_no_entity_falls_back_to_standalone(fake_age_client):
     )
 
     queries = [query for query, _ in FakeAGEClient.instances[0].queries]
-    assert len(queries) == 2
-    assert "MATCH (e {entity_id:" in queries[0]
-    assert "CREATE (d:Decision" in queries[1]
-    assert "DECIDED_ON" not in queries[1]
+    assert len(queries) == 1
+    assert "MATCH (e {entity_id:" not in queries[0]
+    assert "CREATE (d:Decision" in queries[0]
+    assert "DECIDED_ON" not in queries[0]
 
 
 def test_write_decision_with_entity_creates_edge_in_same_query(fake_age_client):
     store = _new_store(fake_age_client)
     FakeAGEClient.instances[0].responses.append([{"d": {"decision_id": "DEC-existing"}}])
 
-    store.write_decision("ENT-1", "duplicate_risk", "flag_leakage", 0.9, {})
+    store.write_decision(
+        "soc",
+        "duplicate_risk",
+        "flag_leakage",
+        0.9,
+        {},
+        metadata={"entity_id": "ENT-1"},
+    )
 
     queries = [query for query, _ in FakeAGEClient.instances[0].queries]
     assert len(queries) == 1
@@ -299,7 +311,7 @@ def test_get_verified_decisions_merges_outcome(fake_age_client):
         ]
     )
 
-    rows = store.get_verified_decisions()
+    rows = store.get_verified_decisions("soc")
 
     assert rows == [
         {
@@ -315,18 +327,26 @@ def test_count_methods_parse_ints(fake_age_client):
     store = _new_store(fake_age_client)
     FakeAGEClient.instances[0].responses.extend([[{"cnt": "2"}], [{"cnt": 1}]])
 
-    assert store.count_verified() == 2
-    assert store.count_correct() == 1
+    assert store.count_verified("soc") == 2
+    assert store.count_correct("soc") == 1
+
+
+def test_count_decisions_parses_int(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append([{"cnt": "3"}])
+
+    assert store.count_decisions("soc") == 3
 
 
 def test_save_centroids_creates_node(fake_age_client):
     store = _new_store(fake_age_client)
 
     store.save_centroids(
-        "DEC-1",
+        "soc",
         "duplicate_risk",
         [[0.1, 0.2], [0.3, 0.4]],
         metadata={"iks": 0.42},
+        decision_id="DEC-1",
     )
 
     query, parameters = FakeAGEClient.instances[0].queries[0]
@@ -344,7 +364,7 @@ def test_save_centroids_creates_node(fake_age_client):
 def test_save_centroids_without_metadata(fake_age_client):
     store = _new_store(fake_age_client)
 
-    store.save_centroids("DEC-1", "price_variance", [[0.5]])
+    store.save_centroids("soc", "price_variance", [[0.5]], decision_id="DEC-1")
 
     query = FakeAGEClient.instances[0].queries[0][0]
     assert "CentroidCheckpoint" in query
@@ -358,7 +378,7 @@ def test_save_centroids_handles_numpy_like(fake_age_client):
 
     store = _new_store(fake_age_client)
 
-    store.save_centroids("DEC-1", "duplicate_risk", ArrayLike())
+    store.save_centroids("soc", "duplicate_risk", ArrayLike(), decision_id="DEC-1")
 
     calls = FakeAGEClient.instances[0].s_calls
     assert any("[[0.1, 0.2]]" in str(value) for value in calls)
@@ -368,6 +388,7 @@ def test_save_evolution_event_creates_node(fake_age_client):
     store = _new_store(fake_age_client)
 
     store.save_evolution_event(
+        "soc",
         "variant_generated",
         "threshold_rule",
         "variant-1",
@@ -394,7 +415,7 @@ def test_save_evolution_event_creates_node(fake_age_client):
 def test_save_evolution_event_without_metadata(fake_age_client):
     store = _new_store(fake_age_client)
 
-    store.save_evolution_event("rejected", "factor_rule", "variant-2")
+    store.save_evolution_event("soc", "rejected", "factor_rule", "variant-2")
 
     query = FakeAGEClient.instances[0].queries[0][0]
     assert "EvolutionEvent" in query
@@ -517,7 +538,7 @@ def test_get_centroid_checkpoints_returns_list(fake_age_client):
         ]
     )
 
-    checkpoints = store.get_centroid_checkpoints(limit=2)
+    checkpoints = store.get_centroid_checkpoints("soc", limit=2)
 
     assert [checkpoint["decision_id"] for checkpoint in checkpoints] == ["DEC-1", "DEC-2"]
     assert checkpoints[0]["centroids"] == [[0.1, 0.2]]
@@ -527,8 +548,8 @@ def test_get_centroid_checkpoints_returns_list(fake_age_client):
 def test_get_centroid_checkpoints_limit_clamped(fake_age_client):
     store = _new_store(fake_age_client)
 
-    store.get_centroid_checkpoints(limit=-1)
-    store.get_centroid_checkpoints(limit=2000)
+    store.get_centroid_checkpoints("soc", limit=-1)
+    store.get_centroid_checkpoints("soc", limit=2000)
 
     queries = "\n".join(query for query, _ in FakeAGEClient.instances[0].queries)
     assert "LIMIT -1" not in queries
@@ -552,7 +573,7 @@ def test_get_centroid_checkpoints_parses_json_strings(fake_age_client):
         ]
     )
 
-    checkpoints = store.get_centroid_checkpoints()
+    checkpoints = store.get_centroid_checkpoints("soc")
 
     assert checkpoints == [
         {
@@ -562,6 +583,38 @@ def test_get_centroid_checkpoints_parses_json_strings(fake_age_client):
             "metadata": {},
         }
     ]
+
+
+def test_load_latest_centroids_returns_numpy_payload(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append(
+        [{"c": {"properties": {"centroids": "[[0.1, 0.2]]"}}}]
+    )
+
+    centroids = store.load_latest_centroids("soc")
+
+    assert centroids.tolist() == [[0.1, 0.2]]
+
+
+def test_get_evolution_events_filters_domain_and_metadata(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append(
+        [{"e": {"properties": {"event_type": "variant_generated", "metadata": '{"seed": 42}'}}}]
+    )
+
+    events = store.get_evolution_events("soc", event_type="variant_generated", limit=5)
+
+    query = FakeAGEClient.instances[0].queries[0][0]
+    assert "e.domain = 'soc'" in query
+    assert "e.event_type = 'variant_generated'" in query
+    assert events == [{"event_type": "variant_generated", "metadata": {"seed": 42}}]
+
+
+def test_archive_methods_are_explicit_noops(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    assert store.archive_old_decisions("soc") == 0
+    assert store.count_archived("soc") == 0
 
 
 def test_close_swallows_exceptions(fake_age_client, monkeypatch):
@@ -584,11 +637,12 @@ class TestAGEGraphStoreLive:
 
         store = AGEGraphStore(dsn=GRAPH_DSN, graph_name="test_graph")
         decision_id = store.write_decision(
-            "LIVE-ENT-1",
+            "soc",
             "duplicate_risk",
             "flag_leakage",
             0.9,
             {"duplicate_score": 0.8},
+            metadata={"entity_id": "LIVE-ENT-1"},
         )
         assert decision_id.startswith("DEC-")
         store.close()
@@ -598,15 +652,16 @@ class TestAGEGraphStoreLive:
 
         store = AGEGraphStore(dsn=GRAPH_DSN, graph_name="test_graph")
         decision_id = store.write_decision(
-            "LIVE-ENT-2",
+            "soc",
             "price_variance",
             "hold_for_review",
             0.7,
             {},
+            metadata={"entity_id": "LIVE-ENT-2"},
         )
         store.write_outcome(decision_id, "hold_for_review", True)
-        assert store.count_verified() >= 1
-        assert store.count_correct() >= 1
+        assert store.count_verified("soc") >= 1
+        assert store.count_correct("soc") >= 1
         store.close()
 
     def test_live_save_evolution_event_no_crash(self):
@@ -614,10 +669,11 @@ class TestAGEGraphStoreLive:
 
         store = AGEGraphStore(dsn=GRAPH_DSN, graph_name="test_graph")
         store.save_evolution_event(
+            "soc",
             "variant_generated",
             "threshold_rule",
             "variant-live",
             metadata={"source": "live-test"},
         )
-        store.save_evolution_event("rejected", "factor_rule", "variant-live-empty")
+        store.save_evolution_event("soc", "rejected", "factor_rule", "variant-live-empty")
         store.close()

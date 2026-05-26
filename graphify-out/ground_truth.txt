@@ -1,0 +1,20 @@
+515896e SAP-CONNECTOR: SAPODataConnector read+write. CSRF 5-step. Demo mode. 31 SAP tests. 335+11skip total.
+7e2f5a9 MYPY-TIGHTEN: 3 modules unsuppressed, type guard tests. 250 tests.
+a64dba1 GRAPHSTORE-CONSOLIDATION: AGE link methods, adapter delegation. 249 tests.
+ef8bfab CA-PROTO-4: mypy guard with gradual strictness. 244+11skip tests.
+a05dae5 CI-AGE-PROTOCOL + AGE-SDK adapter: save_evolution_event + AGEGraphStoreAdapter 12/12 methods (242 tests)
+ M ci_platform/graph/age_graph_store.py
+ M ci_platform/graph/age_sdk_adapter.py
+ M tests/test_age_graph_store.py
+ M tests/test_age_sdk_adapter.py
+?? graphify-out/ground_truth.txt
+515896e SAP-CONNECTOR: SAPODataConnector read+write. CSRF 5-step. Demo mode. 31 SAP tests. 335+11skip total.
+7e2f5a9 MYPY-TIGHTEN: 3 modules unsuppressed, type guard tests. 250 tests.
+a64dba1 GRAPHSTORE-CONSOLIDATION: AGE link methods, adapter delegation. 249 tests.
+ef8bfab CA-PROTO-4: mypy guard with gradual strictness. 244+11skip tests.
+a05dae5 CI-AGE-PROTOCOL + AGE-SDK adapter: save_evolution_event + AGEGraphStoreAdapter 12/12 methods (242 tests)
+ M ci_platform/graph/age_graph_store.py
+ M ci_platform/graph/age_sdk_adapter.py
+ M tests/test_age_graph_store.py
+ M tests/test_age_sdk_adapter.py
+?? graphify-out/ground_truth.txt

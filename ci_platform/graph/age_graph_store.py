@@ -10,6 +10,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+import numpy as np
+
 from ci_platform.graph.age_client import AGEClient
 
 
@@ -64,7 +66,7 @@ class AGEGraphStore:
 
     def write_decision(
         self,
-        entity_id: str,
+        domain: str,
         category: str,
         action: str,
         confidence: float,
@@ -73,11 +75,14 @@ class AGEGraphStore:
     ) -> str:
         decision_id = f"DEC-{uuid.uuid4().hex[:8]}"
         confidence_value = float(confidence)
+        metadata_dict = dict(metadata or {})
+        entity_id = str(metadata_dict.get("entity_id") or "")
         factors_json = json.dumps(factors or {}, sort_keys=True)
-        metadata_json = json.dumps(metadata or {}, sort_keys=True)
+        metadata_json = json.dumps(metadata_dict, sort_keys=True)
 
         props = self._decision_props(
             decision_id,
+            domain,
             entity_id,
             category,
             action,
@@ -85,6 +90,10 @@ class AGEGraphStore:
             factors_json,
             metadata_json,
         )
+        if not entity_id:
+            self._run_query(f"CREATE (d:Decision {props}) RETURN d")
+            return decision_id
+
         entity_query = f"""
         MATCH (e {{entity_id: {self._S(entity_id)}}})
         WITH e LIMIT 1
@@ -100,6 +109,7 @@ class AGEGraphStore:
     def _decision_props(
         self,
         decision_id: str,
+        domain: str,
         entity_id: str,
         category: str,
         action: str,
@@ -110,6 +120,7 @@ class AGEGraphStore:
         return (
             "{"
             f"decision_id: {self._S(decision_id)}, "
+            f"domain: {self._S(domain)}, "
             f"entity_id: {self._S(entity_id)}, "
             f"category: {self._S(category)}, "
             f"recommended_action: {self._S(action)}, "
@@ -154,14 +165,13 @@ class AGEGraphStore:
         return self._node_to_dict(rows[0].get("d", rows[0]))
 
     def get_decisions(
-        self, category: Optional[str] = None, limit: int = 400
+        self, domain: str, category: Optional[str] = None, limit: int = 400
     ) -> List[Dict[str, Any]]:
         limit_value = self._safe_limit(limit)
-        where_clause = (
-            f"WHERE d.category = {self._S(category)}"
-            if category is not None
-            else ""
-        )
+        clauses = [f"d.domain = {self._S(domain)}"]
+        if category is not None:
+            clauses.append(f"d.category = {self._S(category)}")
+        where_clause = "WHERE " + " AND ".join(clauses)
         rows = self._run_query(
             f"""
             MATCH (d:Decision)
@@ -172,44 +182,58 @@ class AGEGraphStore:
         )
         return [self._node_to_dict(row.get("d", row)) for row in rows]
 
-    def get_verified_decisions(self) -> List[Dict[str, Any]]:
+    def get_verified_decisions(self, domain: str) -> List[Dict[str, Any]]:
         rows = self._run_query(
-            """
+            f"""
             MATCH (d:Decision)-[:HAS_OUTCOME]->(o:Outcome)
+            WHERE d.domain = {self._S(domain)}
             RETURN d, o
             """
         )
         return [self._merge_decision_outcome(row) for row in rows]
 
-    def count_verified(self) -> int:
+    def count_verified(self, domain: str) -> int:
         rows = self._run_query(
-            """
+            f"""
             MATCH (d:Decision)-[:HAS_OUTCOME]->(o:Outcome)
+            WHERE d.domain = {self._S(domain)}
             RETURN count(o) AS cnt
             """
         )
         return self._int_from_rows(rows, "cnt")
 
-    def count_correct(self) -> int:
+    def count_correct(self, domain: str) -> int:
         rows = self._run_query(
-            """
+            f"""
             MATCH (d:Decision)-[:HAS_OUTCOME]->(o:Outcome)
-            WHERE o.is_correct = true
+            WHERE d.domain = {self._S(domain)} AND o.is_correct = true
             RETURN count(o) AS cnt
             """
         )
         return self._int_from_rows(rows, "cnt")
 
-    def get_all_decisions(self) -> List[Dict[str, Any]]:
-        return self.get_decisions()
+    def count_decisions(self, domain: str) -> int:
+        rows = self._run_query(
+            f"""
+            MATCH (d:Decision)
+            WHERE d.domain = {self._S(domain)}
+            RETURN count(d) AS cnt
+            """
+        )
+        return self._int_from_rows(rows, "cnt")
+
+    def get_all_decisions(self, domain: str) -> List[Dict[str, Any]]:
+        return self.get_decisions(domain)
 
     def save_centroids(
         self,
-        decision_id: str,
+        domain: str,
         category: str,
         centroids: Any,
         metadata: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> None:
+        decision_id = str(kwargs.get("decision_id") or (metadata or {}).get("decision_id") or "")
         if hasattr(centroids, "tolist"):
             centroids = centroids.tolist()
         centroids_json = json.dumps(centroids, sort_keys=True)
@@ -218,34 +242,60 @@ class AGEGraphStore:
         props = (
             "{"
             f"decision_id: {self._S(decision_id)}, "
+            f"domain: {self._S(domain)}, "
             f"category: {self._S(category)}, "
             f"centroids: {self._S(centroids_json)}, "
             f"metadata: {self._S(metadata_json)}, "
             f"created_at: {self._S(created_at)}"
             "}"
         )
-        query = f"""
-        MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
-        WITH d LIMIT 1
-        CREATE (c:CentroidCheckpoint {props})
-        CREATE (d)-[:HAS_CENTROID_CHECKPOINT]->(c)
-        RETURN c
-        """
-        rows = self._run_query(query)
-        if not rows:
+        if decision_id:
+            query = f"""
+            MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
+            WITH d LIMIT 1
+            CREATE (c:CentroidCheckpoint {props})
+            CREATE (d)-[:HAS_CENTROID_CHECKPOINT]->(c)
+            RETURN c
+            """
+            rows = self._run_query(query)
+            if rows:
+                return
+        else:
             self._run_query(f"CREATE (c:CentroidCheckpoint {props}) RETURN c")
+            return
+        self._run_query(f"CREATE (c:CentroidCheckpoint {props}) RETURN c")
+
+    def load_latest_centroids(self, domain: str) -> Any | None:
+        rows = self._run_query(
+            f"""
+            MATCH (c:CentroidCheckpoint)
+            WHERE c.domain = {self._S(domain)}
+            RETURN c
+            ORDER BY c.created_at DESC
+            LIMIT 1
+            """
+        )
+        if not rows:
+            return None
+        checkpoint = self._node_to_dict(rows[0].get("c", rows[0]))
+        centroids = checkpoint.get("centroids")
+        if centroids is None:
+            return None
+        return np.asarray(centroids, dtype=np.float64)
 
     def save_evolution_event(
         self,
+        domain: str,
         event_type: str,
-        rule_name: str,
-        variant_id: str,
+        rule_name: str = "",
+        variant_id: str = "",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         metadata_json = json.dumps(metadata or {}, sort_keys=True)
         timestamp = datetime.now(timezone.utc).isoformat()
         props = (
             "{"
+            f"domain: {self._S(domain)}, "
             f"event_type: {self._S(event_type)}, "
             f"rule_name: {self._S(rule_name)}, "
             f"variant_id: {self._S(variant_id)}, "
@@ -359,11 +409,13 @@ class AGEGraphStore:
             "created_at": link.get("created_at") or row.get("created_at"),
         }
 
-    def get_centroid_checkpoints(self, limit: int = 50) -> List[Dict[str, Any]]:
+    def get_centroid_checkpoints(self, domain: str, **kwargs: Any) -> List[Dict[str, Any]]:
+        limit = kwargs.pop("limit", 50)
         limit_value = self._safe_limit(limit, default=50)
         rows = self._run_query(
             f"""
             MATCH (c:CentroidCheckpoint)
+            WHERE c.domain = {self._S(domain)}
             RETURN c
             ORDER BY c.created_at DESC
             LIMIT {limit_value}
@@ -371,6 +423,33 @@ class AGEGraphStore:
         )
         checkpoints = [self._node_to_dict(row.get("c", row)) for row in rows]
         return list(reversed(checkpoints))
+
+    def get_evolution_events(self, domain: str, **kwargs: Any) -> List[Dict[str, Any]]:
+        limit = self._safe_limit(kwargs.pop("limit", 100), default=100)
+        clauses = [f"e.domain = {self._S(domain)}"]
+        for key in ("event_type", "rule_name", "variant_id"):
+            value = kwargs.get(key)
+            if value is not None:
+                clauses.append(f"e.{key} = {self._S(value)}")
+        where_clause = "WHERE " + " AND ".join(clauses)
+        rows = self._run_query(
+            f"""
+            MATCH (e:EvolutionEvent)
+            {where_clause}
+            RETURN e
+            ORDER BY e.timestamp DESC
+            LIMIT {limit}
+            """
+        )
+        return [self._node_to_dict(row.get("e", row)) for row in rows]
+
+    def archive_old_decisions(self, domain: str, keep_recent: int = 800) -> int:
+        """AGE retention is managed externally; no in-graph archive is performed."""
+        return 0
+
+    def count_archived(self, domain: str) -> int:
+        """AGE retention is managed externally; no archive count is tracked."""
+        return 0
 
     def query_context(self, entity_id: str, hops: int = 2) -> List[Dict[str, Any]]:
         hop_count = self._safe_hops(hops)

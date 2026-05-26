@@ -30,8 +30,8 @@ class FakeGraphStore:
             }
         ]
 
-    def write_decision(self, entity_id, category, action, confidence, factors, metadata=None):
-        self.calls.append(("write_decision", entity_id, category, action, confidence, factors, metadata))
+    def write_decision(self, domain, category, action, confidence, factors, metadata=None):
+        self.calls.append(("write_decision", domain, category, action, confidence, factors, metadata))
         return "DEC-2"
 
     def write_outcome(self, decision_id, actual_action, is_correct, metadata=None):
@@ -41,35 +41,55 @@ class FakeGraphStore:
         self.calls.append(("get_decision", decision_id))
         return self.decisions.get(decision_id)
 
-    def get_decisions(self, category=None, limit=400):
-        self.calls.append(("get_decisions", category, limit))
+    def get_decisions(self, domain, category=None, limit=400):
+        self.calls.append(("get_decisions", domain, category, limit))
         return list(self.decisions.values())[:limit]
 
-    def get_verified_decisions(self):
-        self.calls.append(("get_verified_decisions",))
+    def get_verified_decisions(self, domain):
+        self.calls.append(("get_verified_decisions", domain))
         return list(self.verified)
 
-    def get_all_decisions(self):
-        self.calls.append(("get_all_decisions",))
+    def get_all_decisions(self, domain):
+        self.calls.append(("get_all_decisions", domain))
         return list(self.decisions.values())
 
-    def count_verified(self):
-        self.calls.append(("count_verified",))
+    def count_verified(self, domain):
+        self.calls.append(("count_verified", domain))
         return len(self.verified)
 
-    def count_correct(self):
-        self.calls.append(("count_correct",))
+    def count_correct(self, domain):
+        self.calls.append(("count_correct", domain))
         return sum(1 for row in self.verified if row["is_correct"])
 
-    def save_centroids(self, decision_id, category, centroids, metadata=None):
-        self.calls.append(("save_centroids", decision_id, category, centroids, metadata))
+    def count_decisions(self, domain):
+        self.calls.append(("count_decisions", domain))
+        return len(self.decisions)
 
-    def get_centroid_checkpoints(self, limit=50):
-        self.calls.append(("get_centroid_checkpoints", limit))
+    def save_centroids(self, domain, category, centroids, metadata=None, **kwargs):
+        self.calls.append(("save_centroids", domain, category, centroids, metadata, kwargs))
+
+    def load_latest_centroids(self, domain):
+        self.calls.append(("load_latest_centroids", domain))
+        return [[0.1]]
+
+    def get_centroid_checkpoints(self, domain, **kwargs):
+        self.calls.append(("get_centroid_checkpoints", domain, kwargs))
         return [{"decision_id": "DEC-1", "category": "price_variance"}]
 
-    def save_evolution_event(self, event_type, rule_name, variant_id, metadata=None):
-        self.calls.append(("save_evolution_event", event_type, rule_name, variant_id, metadata))
+    def save_evolution_event(self, domain, event_type, rule_name="", variant_id="", metadata=None):
+        self.calls.append(("save_evolution_event", domain, event_type, rule_name, variant_id, metadata))
+
+    def get_evolution_events(self, domain, **kwargs):
+        self.calls.append(("get_evolution_events", domain, kwargs))
+        return [{"event_type": "variant_generated"}]
+
+    def archive_old_decisions(self, domain, keep_recent=800):
+        self.calls.append(("archive_old_decisions", domain, keep_recent))
+        return 0
+
+    def count_archived(self, domain):
+        self.calls.append(("count_archived", domain))
+        return 0
 
     def link_decision_to_entity(self, decision_id, entity_id, edge_type="DECIDED_ON"):
         self.calls.append(("link_decision_to_entity", decision_id, entity_id, edge_type))
@@ -150,24 +170,24 @@ def test_adapter_delegates_decision_and_outcome_methods():
     adapter = AGEGraphStoreAdapter(store=store)
 
     decision_id = adapter.write_decision(
-        entity_id="ENT-2",
+        "soc",
         category="duplicate_risk",
         action="flag_leakage",
         confidence=0.91,
         factors={"duplicate_score": 0.8},
-        metadata={"source": "unit"},
+        metadata={"source": "unit", "entity_id": "ENT-2"},
     )
     adapter.write_outcome(decision_id, "flag_leakage", True, metadata={"verified_by": "unit"})
 
     assert decision_id == "DEC-2"
     assert store.calls[0] == (
         "write_decision",
-        "ENT-2",
+        "soc",
         "duplicate_risk",
         "flag_leakage",
         0.91,
         {"duplicate_score": 0.8},
-        {"source": "unit"},
+        {"source": "unit", "entity_id": "ENT-2"},
     )
     assert store.calls[1] == (
         "write_outcome",
@@ -183,7 +203,7 @@ def test_adapter_get_verified_decisions_shape_for_sdk_shadow_runner():
 
     adapter = AGEGraphStoreAdapter(store=FakeGraphStore())
 
-    verified = adapter.get_verified_decisions()
+    verified = adapter.get_verified_decisions("soc")
 
     assert verified
     row = verified[0]
@@ -198,10 +218,11 @@ def test_adapter_delegates_counts_and_reads():
     adapter = AGEGraphStoreAdapter(store=store)
 
     assert adapter.get_decision("DEC-1")["decision_id"] == "DEC-1"
-    assert adapter.get_decisions(category="price_variance", limit=10)
-    assert adapter.get_all_decisions()
-    assert adapter.count_verified() == 1
-    assert adapter.count_correct() == 1
+    assert adapter.get_decisions("soc", category="price_variance", limit=10)
+    assert adapter.get_all_decisions("soc")
+    assert adapter.count_verified("soc") == 1
+    assert adapter.count_correct("soc") == 1
+    assert adapter.count_decisions("soc") == 1
 
 
 def test_adapter_delegates_centroids_and_evolution_events():
@@ -210,20 +231,33 @@ def test_adapter_delegates_centroids_and_evolution_events():
     store = FakeGraphStore()
     adapter = AGEGraphStoreAdapter(store=store)
 
-    adapter.save_centroids("DEC-1", "price_variance", [[0.1]], metadata={"iks": 0.5})
-    checkpoints = adapter.get_centroid_checkpoints(limit=5)
-    adapter.save_evolution_event("variant_generated", "threshold_rule", "variant-1", metadata={"seed": 42})
+    adapter.save_centroids("soc", "price_variance", [[0.1]], metadata={"iks": 0.5}, decision_id="DEC-1")
+    latest = adapter.load_latest_centroids("soc")
+    checkpoints = adapter.get_centroid_checkpoints("soc", limit=5)
+    adapter.save_evolution_event("soc", "variant_generated", "threshold_rule", "variant-1", metadata={"seed": 42})
+    events = adapter.get_evolution_events("soc", event_type="variant_generated")
+    archived = adapter.archive_old_decisions("soc", keep_recent=800)
+    archive_count = adapter.count_archived("soc")
 
+    assert latest == [[0.1]]
     assert checkpoints == [{"decision_id": "DEC-1", "category": "price_variance"}]
-    assert ("save_centroids", "DEC-1", "price_variance", [[0.1]], {"iks": 0.5}) in store.calls
-    assert ("get_centroid_checkpoints", 5) in store.calls
+    assert events == [{"event_type": "variant_generated"}]
+    assert archived == 0
+    assert archive_count == 0
+    assert ("save_centroids", "soc", "price_variance", [[0.1]], {"iks": 0.5}, {"decision_id": "DEC-1"}) in store.calls
+    assert ("load_latest_centroids", "soc") in store.calls
+    assert ("get_centroid_checkpoints", "soc", {"limit": 5}) in store.calls
     assert (
         "save_evolution_event",
+        "soc",
         "variant_generated",
         "threshold_rule",
         "variant-1",
         {"seed": 42},
     ) in store.calls
+    assert ("get_evolution_events", "soc", {"event_type": "variant_generated"}) in store.calls
+    assert ("archive_old_decisions", "soc", 800) in store.calls
+    assert ("count_archived", "soc") in store.calls
 
 
 def test_adapter_delegates_decision_entity_links():
@@ -284,27 +318,28 @@ class TestAGEGraphStoreAdapterLive:
 
         adapter = AGEGraphStoreAdapter(dsn=GRAPH_DSN, graph_name="test_graph")
         decision_id = adapter.write_decision(
-            "LIVE-SDK-ENT-1",
+            "soc",
             "price_variance",
             "hold_for_review",
             0.74,
             {"amount_variance_ratio": 0.2},
+            metadata={"entity_id": "LIVE-SDK-ENT-1"},
         )
         decision = adapter.get_decision(decision_id)
         adapter.write_outcome(decision_id, "hold_for_review", True)
-        verified = adapter.get_verified_decisions()
+        verified = adapter.get_verified_decisions("soc")
 
         assert decision_id.startswith("DEC-")
         assert decision is None or decision.get("decision_id") == decision_id
         assert any(row.get("decision_id") == decision_id for row in verified)
-        assert adapter.count_verified() >= 1
-        assert adapter.count_correct() >= 1
+        assert adapter.count_verified("soc") >= 1
+        assert adapter.count_correct("soc") >= 1
         adapter.close()
 
     def test_live_evolution_and_centroids_no_crash(self):
         from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
 
         adapter = AGEGraphStoreAdapter(dsn=GRAPH_DSN, graph_name="test_graph")
-        adapter.save_evolution_event("variant_generated", "threshold_rule", "variant-live")
-        adapter.save_centroids("DEC-live", "price_variance", [[0.1, 0.2]])
+        adapter.save_evolution_event("soc", "variant_generated", "threshold_rule", "variant-live")
+        adapter.save_centroids("soc", "price_variance", [[0.1, 0.2]], decision_id="DEC-live")
         adapter.close()
