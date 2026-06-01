@@ -34,7 +34,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Callable, Dict, List, Optional, TypeVar, cast
 
 import psycopg  # sync only — no AsyncConnection anywhere
 
@@ -48,6 +48,7 @@ DATABASE_URL = os.getenv(
 
 _DESTRUCTIVE_SET_RE = re.compile(r'\bSET\s+(\w+)\s*=\s*\{')
 _MERGE_RE = re.compile(r'\bMERGE\s*\(', re.IGNORECASE)
+T = TypeVar("T")
 
 
 def _check_safe_cypher(cypher: str) -> None:
@@ -347,6 +348,50 @@ class AGEClient:
             results.append(row_dict)
         return results
 
+    def _execute_cypher_on_connection(
+        self,
+        conn: psycopg.Connection,
+        cypher: str,
+        parameters: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        if not cypher.strip():
+            return []
+        _check_safe_cypher(cypher)
+        query = cypher
+        if parameters:
+            for name in sorted(parameters, key=len, reverse=True):
+                query = query.replace(f"${name}", AGEClient.serialize_for_age(parameters[name]))
+
+        columns = self._extract_columns(query)
+        sql = self._build_sql(query, columns)
+        cur = conn.execute(sql)
+        rows = cur.fetchall()
+
+        results: List[Dict[str, Any]] = []
+        for row in rows:
+            row_dict: Dict[str, Any] = {}
+            for i, col in enumerate(columns):
+                raw = row[i] if i < len(row) else None
+                row_dict[col] = self._normalize_value(self._parse_agtype(raw))
+            results.append(row_dict)
+        return results
+
+    def _sync_transaction(self, operation: Callable[["AGETransaction"], T]) -> T:
+        with psycopg.connect(self._dsn, autocommit=False, connect_timeout=5) as conn:
+            conn.execute("LOAD 'age'")
+            conn.execute("SET search_path = ag_catalog, '$user', public")
+            tx = AGETransaction(self, conn)
+            try:
+                result = operation(tx)
+            except Exception:
+                conn.rollback()
+                raise
+            conn.commit()
+            return result
+
+    async def run_transaction(self, operation: Callable[["AGETransaction"], T]) -> T:
+        return await asyncio.to_thread(self._sync_transaction, operation)
+
     async def run_query(
         self,
         query: str,
@@ -361,7 +406,6 @@ class AGEClient:
         return await asyncio.to_thread(
             self._sync_execute, query, parameters
         )
-
     # ── convenience methods (Neo4jClient interface parity) ────────────────────
 
     async def get_security_context(self, alert_id: str) -> Dict:
@@ -874,6 +918,24 @@ class AGEClient:
                 params,
             )
         return True
+
+
+class AGETransaction:
+    """Transaction-bound AGE helper used for operations that need one connection."""
+
+    def __init__(self, client: AGEClient, conn: psycopg.Connection) -> None:
+        self._client = client
+        self._conn = conn
+
+    def execute_sql(self, sql: str, parameters: Optional[tuple[Any, ...]] = None) -> Any:
+        return self._conn.execute(sql, parameters)
+
+    def run_cypher(
+        self,
+        cypher: str,
+        parameters: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        return self._client._execute_cypher_on_connection(self._conn, cypher, parameters)
 
 
 # ── module-level singleton + factory ──────────────────────────────────────────

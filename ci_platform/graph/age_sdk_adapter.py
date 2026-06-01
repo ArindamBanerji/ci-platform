@@ -40,6 +40,42 @@ class AGEGraphStoreAdapter:
             metadata=metadata,
         )
 
+    def write_governed_decision(
+        self,
+        decision_id: str,
+        domain: str,
+        category: str,
+        category_index: int,
+        recommended_action: str,
+        recommended_index: int,
+        confidence: float,
+        probabilities: list[float],
+        factor_vector: list[float],
+        factor_names: list[str],
+        source: str = "score",
+        scorer_version: str = "",
+        preset_version: str = "",
+        factor_schema_version: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._store.write_governed_decision(
+            decision_id=decision_id,
+            domain=domain,
+            category=category,
+            category_index=category_index,
+            recommended_action=recommended_action,
+            recommended_index=recommended_index,
+            confidence=confidence,
+            probabilities=probabilities,
+            factor_vector=factor_vector,
+            factor_names=factor_names,
+            source=source,
+            scorer_version=scorer_version,
+            preset_version=preset_version,
+            factor_schema_version=factor_schema_version,
+            metadata=metadata,
+        )
+
     def write_outcome(
         self,
         decision_id: str,
@@ -52,6 +88,172 @@ class AGEGraphStoreAdapter:
             actual_action=actual_action,
             is_correct=is_correct,
             metadata=metadata,
+        )
+
+    def write_observation(
+        self,
+        observation_id: str,
+        domain: str,
+        category: str,
+        recommended_action: str,
+        confidence: float,
+        source_route: str,
+        scorer_version: str,
+        factor_schema_version: str,
+        entity_id: str | None = None,
+        factor_vector: list[float] | None = None,
+        factor_names: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._store.write_observation(
+            observation_id=observation_id,
+            domain=domain,
+            category=category,
+            recommended_action=recommended_action,
+            confidence=confidence,
+            source_route=source_route,
+            scorer_version=scorer_version,
+            factor_schema_version=factor_schema_version,
+            entity_id=entity_id,
+            factor_vector=factor_vector,
+            factor_names=factor_names,
+            metadata=metadata,
+        )
+
+    def write_conservation_status(
+        self,
+        status_id: str,
+        domain: str,
+        V: int,
+        q: float,
+        alpha: float,
+        theta_min: float,
+        verified_count: int,
+        correct_count: int,
+        status: str,
+        policy_version: str,
+    ) -> None:
+        self._store.write_conservation_status(
+            status_id=status_id,
+            domain=domain,
+            V=V,
+            q=q,
+            alpha=alpha,
+            theta_min=theta_min,
+            verified_count=verified_count,
+            correct_count=correct_count,
+            status=status,
+            policy_version=policy_version,
+        )
+
+    def append_evidence_receipt(
+        self,
+        receipt_intent_id: str,
+        domain: str,
+        decision_id: str,
+        canonical_payload: dict[str, Any],
+        actor: str,
+        source_route: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[int, str]:
+        return self._store.append_evidence_receipt(
+            receipt_intent_id=receipt_intent_id,
+            domain=domain,
+            decision_id=decision_id,
+            canonical_payload=canonical_payload,
+            actor=actor,
+            source_route=source_route,
+            metadata=metadata,
+        )
+
+    def write_fingerprint(
+        self,
+        fingerprint_id: str,
+        domain: str,
+        factor_names: list[str],
+        factor_stats: dict[str, Any],
+        skipped_incompatible: int,
+        window: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._store.write_fingerprint(
+            fingerprint_id=fingerprint_id,
+            domain=domain,
+            factor_names=factor_names,
+            factor_stats=factor_stats,
+            skipped_incompatible=skipped_incompatible,
+            window=window,
+            metadata=metadata,
+        )
+
+    def write_centroid_checkpoint(
+        self,
+        checkpoint_id: str,
+        domain: str,
+        category: str,
+        action: str,
+        centroids: Any,
+        decisions_count: int,
+        verified_count: int,
+        iks: float,
+        shape: list[int],
+        factor_names_hash: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._store.write_centroid_checkpoint(
+            checkpoint_id=checkpoint_id,
+            domain=domain,
+            category=category,
+            action=action,
+            centroids=centroids,
+            decisions_count=decisions_count,
+            verified_count=verified_count,
+            iks=iks,
+            shape=shape,
+            factor_names_hash=factor_names_hash,
+            metadata=metadata,
+        )
+
+    def write_evolution_event(
+        self,
+        event_id: str,
+        domain: str,
+        event_type: str,
+        rule_name: str,
+        variant_id: str,
+        source_copilot: str | None = None,
+        source_rule: str | None = None,
+        metric: float | None = None,
+        shadow_batch_size: int | None = None,
+        min_shadow_batches: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._store.write_evolution_event(
+            event_id=event_id,
+            domain=domain,
+            event_type=event_type,
+            rule_name=rule_name,
+            variant_id=variant_id,
+            source_copilot=source_copilot,
+            source_rule=source_rule,
+            metric=metric,
+            shadow_batch_size=shadow_batch_size,
+            min_shadow_batches=min_shadow_batches,
+            metadata=metadata,
+        )
+
+    def link_entity(
+        self,
+        decision_id: str,
+        entity_id: str,
+        entity_type: str,
+        domain: str,
+    ) -> None:
+        self._store.link_entity(
+            decision_id=decision_id,
+            entity_id=entity_id,
+            entity_type=entity_type,
+            domain=domain,
         )
 
     def get_decision(self, decision_id: str) -> dict[str, Any] | None:
@@ -74,11 +276,31 @@ class AGEGraphStoreAdapter:
     def count_verified(self, domain: str) -> int:
         return self._store.count_verified(domain)
 
+    def count_verified_decisions(self, domain: str) -> int:
+        return self._store.count_verified_decisions(domain)
+
     def count_correct(self, domain: str) -> int:
         return self._store.count_correct(domain)
 
     def count_decisions(self, domain: str) -> int:
         return self._store.count_decisions(domain)
+
+    def archive_decisions(
+        self,
+        domain: str,
+        before: float,
+        status_filter: str = "pending",
+        confirm_verified: bool = False,
+    ) -> int:
+        return self._store.archive_decisions(
+            domain=domain,
+            before=before,
+            status_filter=status_filter,
+            confirm_verified=confirm_verified,
+        )
+
+    def domain_scoped_reset(self, domain: str) -> None:
+        self._store.domain_scoped_reset(domain)
 
     def save_centroids(
         self,
