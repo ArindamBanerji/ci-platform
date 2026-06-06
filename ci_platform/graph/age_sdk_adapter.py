@@ -285,6 +285,84 @@ class AGEGraphStoreAdapter:
     def count_decisions(self, domain: str) -> int:
         return self._store.count_decisions(domain)
 
+    def count_categories_with_n(self, domain: str, n: int = 1) -> int:
+        return self._store.count_categories_with_n(domain, n=n)
+
+    def update_centroid(
+        self,
+        domain: str,
+        category: str,
+        action: str,
+        centroid_vector: list[float],
+        delta_norm: float,
+        caused_by_decision_id: str | None = None,
+    ) -> None:
+        self._store.update_centroid(
+            domain=domain,
+            category=category,
+            action=action,
+            centroid_vector=centroid_vector,
+            delta_norm=delta_norm,
+            caused_by_decision_id=caused_by_decision_id,
+        )
+
+    def get_centroids(self, domain: str) -> list[dict[str, object]]:
+        return self._store.get_centroids(domain)
+
+    def update_dk_weights(
+        self,
+        domain: str,
+        weight_tensor: list[list[float]],
+        n_decisions_used: int,
+        computed_at: float,
+    ) -> None:
+        self._store.update_dk_weights(
+            domain=domain,
+            weight_tensor=weight_tensor,
+            n_decisions_used=n_decisions_used,
+            computed_at=computed_at,
+        )
+
+    def get_dk_weights(self, domain: str) -> dict[str, object] | None:
+        return self._store.get_dk_weights(domain)
+
+    def update_conservation_state(
+        self,
+        domain: str,
+        status: str,
+        alpha: float,
+        q: float,
+        V: int,
+        theta_min: float,
+        product: float,
+        categories_total: int,
+        categories_with_data: int,
+        baseline_product: float,
+        relative_threshold: float,
+        complacency_flag: str,
+        caused_by_decision_id: str | None = None,
+        old_status: str | None = None,
+    ) -> str:
+        return self._store.update_conservation_state(
+            domain=domain,
+            status=status,
+            alpha=alpha,
+            q=q,
+            V=V,
+            theta_min=theta_min,
+            product=product,
+            categories_total=categories_total,
+            categories_with_data=categories_with_data,
+            baseline_product=baseline_product,
+            relative_threshold=relative_threshold,
+            complacency_flag=complacency_flag,
+            caused_by_decision_id=caused_by_decision_id,
+            old_status=old_status,
+        )
+
+    def get_conservation_state(self, domain: str) -> dict[str, object] | None:
+        return self._store.get_conservation_state(domain)
+
     def archive_decisions(
         self,
         domain: str,

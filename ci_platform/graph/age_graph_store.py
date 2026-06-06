@@ -5,15 +5,21 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import threading
+import time
 import uuid
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 import numpy as np
 
 from ci_platform.graph.age_client import AGEClient
+
+
+log = logging.getLogger(__name__)
 
 
 class AGEGraphStore:
@@ -61,6 +67,223 @@ class AGEGraphStore:
         except (TypeError, ValueError):
             return 2
         return max(1, min(value, 5))
+
+    @staticmethod
+    def _as_int(
+        value: int | float | str | bytes | bytearray | bool | None,
+        default: int = 0,
+    ) -> int:
+        if value is None:
+            return default
+        return int(value)
+
+    @staticmethod
+    def _as_float(
+        value: Any,
+        default: float = 0.0,
+    ) -> float:
+        if value is None:
+            return default
+        return float(value)
+
+    @staticmethod
+    def _normalize_centroid_vector(centroid_vector: Any) -> List[float]:
+        if isinstance(centroid_vector, (str, bytes, bytearray)):
+            raise TypeError("centroid_vector must be a non-string iterable of numeric values")
+        if isinstance(centroid_vector, Mapping):
+            raise TypeError("centroid_vector must be a non-mapping iterable of numeric values")
+        if not isinstance(centroid_vector, Iterable):
+            raise TypeError("centroid_vector must be an iterable of numeric values")
+        try:
+            return [float(value) for value in centroid_vector]
+        except (TypeError, ValueError) as error:
+            raise TypeError("centroid_vector must contain only numeric values") from error
+
+    @staticmethod
+    def _normalize_dk_weight_tensor(weight_tensor: Any) -> List[List[float]]:
+        if isinstance(weight_tensor, (str, bytes, bytearray)):
+            raise TypeError("weight_tensor must be a non-string 2D numeric iterable")
+        if isinstance(weight_tensor, Mapping):
+            raise TypeError("weight_tensor must be a non-mapping 2D numeric iterable")
+        if not isinstance(weight_tensor, Iterable):
+            raise TypeError("weight_tensor must be a 2D numeric iterable")
+        rows: List[List[float]] = []
+        expected_width: int | None = None
+        for row in weight_tensor:
+            if isinstance(row, (str, bytes, bytearray)):
+                raise TypeError("weight_tensor rows must be non-string numeric iterables")
+            if isinstance(row, Mapping):
+                raise TypeError("weight_tensor rows must be non-mapping numeric iterables")
+            if not isinstance(row, Iterable):
+                raise TypeError("weight_tensor must be 2D, not a 1D iterable")
+            try:
+                normalized_row = [float(value) for value in row]
+            except (TypeError, ValueError) as error:
+                raise TypeError("weight_tensor must contain only numeric values") from error
+            if not normalized_row:
+                raise ValueError("weight_tensor rows must be non-empty")
+            if expected_width is None:
+                expected_width = len(normalized_row)
+            elif len(normalized_row) != expected_width:
+                raise ValueError("weight_tensor rows must be rectangular")
+            rows.append(normalized_row)
+        if not rows:
+            raise ValueError("weight_tensor must be non-empty")
+        return rows
+
+    @staticmethod
+    def _normalize_n_decisions_used(n_decisions_used: Any) -> int:
+        try:
+            value = int(n_decisions_used)
+        except (TypeError, ValueError) as error:
+            raise TypeError("n_decisions_used must be an integer") from error
+        if value < 0:
+            raise ValueError("n_decisions_used must be non-negative")
+        return value
+
+    @staticmethod
+    def _normalize_computed_at(computed_at: Any) -> float:
+        try:
+            return float(computed_at)
+        except (TypeError, ValueError) as error:
+            raise TypeError("computed_at must be numeric") from error
+
+    @staticmethod
+    def _sort_key(value: Any) -> tuple[int, Any]:
+        if value is None:
+            return (0, "")
+        try:
+            return (1, float(value))
+        except (TypeError, ValueError):
+            return (1, str(value))
+
+    @classmethod
+    def _latest_row(cls, rows: List[Dict[str, Any]], *keys: str) -> Dict[str, Any] | None:
+        if not rows:
+            return None
+        return max(rows, key=lambda row: tuple(cls._sort_key(row.get(key)) for key in keys))
+
+    @staticmethod
+    def _normalize_domain(domain: Any) -> str:
+        if not isinstance(domain, str) or not domain.strip():
+            raise ValueError("domain must be a non-empty string")
+        return domain
+
+    @staticmethod
+    def _normalize_conservation_status(status: Any, field_name: str = "status") -> str:
+        if not isinstance(status, str) or status not in {"GREEN", "AMBER", "RED"}:
+            raise ValueError(f"{field_name} must be one of GREEN, AMBER, RED")
+        return status
+
+    @classmethod
+    def _normalize_optional_conservation_status(cls, old_status: Any) -> str | None:
+        if old_status is None:
+            return None
+        return cls._normalize_conservation_status(old_status, field_name="old_status")
+
+    @staticmethod
+    def _normalize_bounded_float(value: Any, field_name: str) -> float:
+        try:
+            normalized = float(value)
+        except (TypeError, ValueError) as error:
+            raise TypeError(f"{field_name} must be numeric") from error
+        if normalized < 0.0 or normalized > 1.0:
+            raise ValueError(f"{field_name} must be between 0.0 and 1.0")
+        return normalized
+
+    @staticmethod
+    def _normalize_float(value: Any, field_name: str) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError) as error:
+            raise TypeError(f"{field_name} must be numeric") from error
+
+    @classmethod
+    def _normalize_positive_float(cls, value: Any, field_name: str) -> float:
+        normalized = cls._normalize_float(value, field_name)
+        if normalized <= 0.0:
+            raise ValueError(f"{field_name} must be greater than 0")
+        return normalized
+
+    @staticmethod
+    def _normalize_non_negative_int(value: Any, field_name: str) -> int:
+        if isinstance(value, bool):
+            raise TypeError(f"{field_name} must be an integer")
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError) as error:
+            raise TypeError(f"{field_name} must be an integer") from error
+        if normalized < 0:
+            raise ValueError(f"{field_name} must be non-negative")
+        return normalized
+
+    @staticmethod
+    def _normalize_complacency_flag(complacency_flag: Any) -> str:
+        if not isinstance(complacency_flag, str) or complacency_flag not in {"true", "false"}:
+            raise ValueError("complacency_flag must be exactly 'true' or 'false'")
+        return complacency_flag
+
+    @staticmethod
+    def _normalize_optional_string(value: Any, field_name: str) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise TypeError(f"{field_name} must be a string or None")
+        return value
+
+    @staticmethod
+    def _require_field(row: Dict[str, object], key: str) -> object:
+        if key not in row or row[key] is None:
+            raise ValueError(f"L5ConservationState missing required field: {key}")
+        return row[key]
+
+    @classmethod
+    def _normalize_conservation_state_values(
+        cls,
+        *,
+        domain: Any,
+        status: Any,
+        alpha: Any,
+        q: Any,
+        V: Any,
+        theta_min: Any,
+        product: Any,
+        categories_total: Any,
+        categories_with_data: Any,
+        baseline_product: Any,
+        relative_threshold: Any,
+        complacency_flag: Any,
+        caused_by_decision_id: Any,
+        old_status: Any,
+    ) -> Dict[str, object]:
+        categories_total_value = cls._normalize_non_negative_int(
+            categories_total, "categories_total"
+        )
+        categories_with_data_value = cls._normalize_non_negative_int(
+            categories_with_data, "categories_with_data"
+        )
+        if categories_with_data_value > categories_total_value:
+            raise ValueError("categories_with_data must be less than or equal to categories_total")
+        return {
+            "domain": cls._normalize_domain(domain),
+            "status": cls._normalize_conservation_status(status),
+            "alpha": cls._normalize_bounded_float(alpha, "alpha"),
+            "q": cls._normalize_bounded_float(q, "q"),
+            "V": cls._normalize_non_negative_int(V, "V"),
+            "theta_min": cls._normalize_positive_float(theta_min, "theta_min"),
+            "product": cls._normalize_float(product, "product"),
+            "categories_total": categories_total_value,
+            "categories_with_data": categories_with_data_value,
+            "baseline_product": cls._normalize_float(baseline_product, "baseline_product"),
+            "relative_threshold": cls._normalize_float(
+                relative_threshold, "relative_threshold"
+            ),
+            "complacency_flag": cls._normalize_complacency_flag(complacency_flag),
+            "caused_by_decision_id": cls._normalize_optional_string(
+                caused_by_decision_id, "caused_by_decision_id"
+            ),
+            "old_status": cls._normalize_optional_conservation_status(old_status),
+        }
 
     def _run_query(self, cypher: str) -> List[Dict[str, Any]]:
         return self._run(self._client.run_query(cypher, None)) or []
@@ -136,6 +359,38 @@ class AGEGraphStore:
         metadata_dict["probabilities"] = [float(value) for value in probabilities]
         metadata_dict["category_index"] = int(category_index)
         metadata_dict["recommended_index"] = int(recommended_index)
+        expected_payload = self._governed_decision_payload(
+            decision_id=decision_id,
+            domain=domain,
+            category=category,
+            category_index=category_index,
+            recommended_action=recommended_action,
+            recommended_index=recommended_index,
+            confidence=confidence,
+            probabilities=probabilities,
+            factor_vector=factor_vector,
+            factor_names=factor_names,
+            source=source,
+            scorer_version=scorer_version,
+            preset_version=preset_version,
+            factor_schema_version=factor_schema_version,
+            metadata=metadata_dict,
+        )
+        existing_rows = self._run_query(
+            f"""
+            MATCH (d:Decision {{decision_id: {self._S(str(decision_id))}}})
+            WHERE d.domain = {self._S(str(domain))}
+            RETURN d
+            """
+        )
+        if existing_rows:
+            if len(existing_rows) > 1:
+                raise ValueError(f"duplicate governed decision_id in domain: {decision_id}")
+            existing_payload = self._governed_decision_payload_from_node(existing_rows[0]["d"])
+            if existing_payload == expected_payload:
+                return
+            raise ValueError(f"conflicting governed decision_id in domain: {decision_id}")
+
         created_at = metadata_dict.get("created_at")
         if created_at is None:
             created_at = datetime.now(timezone.utc).timestamp()
@@ -161,6 +416,71 @@ class AGEGraphStore:
             "}"
         )
         self._run_query(f"CREATE (d:Decision {props}) RETURN d")
+
+    def _governed_decision_payload(
+        self,
+        *,
+        decision_id: str,
+        domain: str,
+        category: str,
+        category_index: int,
+        recommended_action: str,
+        recommended_index: int,
+        confidence: float,
+        probabilities: List[float],
+        factor_vector: List[float],
+        factor_names: List[str],
+        source: str,
+        scorer_version: str,
+        preset_version: str,
+        factor_schema_version: str,
+        metadata: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        metadata_identity = dict(metadata or {})
+        metadata_identity.pop("created_at", None)
+        return {
+            "decision_id": str(decision_id),
+            "domain": str(domain),
+            "category": str(category),
+            "category_index": int(category_index),
+            "recommended_action": str(recommended_action),
+            "recommended_index": int(recommended_index),
+            "confidence": float(confidence),
+            "probabilities": [float(value) for value in list(probabilities)],
+            "factor_vector": [float(value) for value in list(factor_vector)],
+            "factor_names": [str(value) for value in list(factor_names)],
+            "source": str(source),
+            "scorer_version": str(scorer_version),
+            "preset_version": str(preset_version),
+            "factor_schema_version": str(factor_schema_version),
+            "metadata": metadata_identity,
+            "status": "pending",
+        }
+
+    def _governed_decision_payload_from_node(self, node: Any) -> Dict[str, Any]:
+        data = self._node_to_dict(node)
+        metadata = data.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        payload = self._governed_decision_payload(
+            decision_id=data.get("decision_id", ""),
+            domain=data.get("domain", ""),
+            category=data.get("category", ""),
+            category_index=data.get("category_index", 0),
+            recommended_action=data.get("recommended_action", ""),
+            recommended_index=data.get("recommended_index", 0),
+            confidence=data.get("confidence", 0.0),
+            probabilities=data.get("probabilities") or [],
+            factor_vector=data.get("factor_vector") or [],
+            factor_names=data.get("factor_names") or [],
+            source=data.get("source", ""),
+            scorer_version=data.get("scorer_version", ""),
+            preset_version=data.get("preset_version", ""),
+            factor_schema_version=data.get("factor_schema_version", ""),
+            metadata=metadata,
+        )
+        payload["status"] = str(data.get("status", ""))
+        return payload
 
     def _decision_props(
         self,
@@ -378,12 +698,12 @@ class AGEGraphStore:
             "status_id": str(node.get("status_id")),
             "snapshot_id": str(node.get("snapshot_id") or node.get("status_id")),
             "domain": str(node.get("domain")),
-            "V": int(node.get("V")),
-            "q": float(node.get("q")),
-            "alpha": float(node.get("alpha")),
-            "theta_min": float(node.get("theta_min")),
-            "verified_count": int(node.get("verified_count")),
-            "correct_count": int(node.get("correct_count")),
+            "V": self._as_int(node.get("V")),
+            "q": self._as_float(node.get("q")),
+            "alpha": self._as_float(node.get("alpha")),
+            "theta_min": self._as_float(node.get("theta_min")),
+            "verified_count": self._as_int(node.get("verified_count")),
+            "correct_count": self._as_int(node.get("correct_count")),
             "status": str(node.get("status")),
             "policy_version": str(node.get("policy_version")),
             "counts_scope": str(node.get("counts_scope") or "verified_only"),
@@ -449,8 +769,8 @@ class AGEGraphStore:
             "domain": str(node.get("domain")),
             "factor_names_json": json.dumps(factor_names, sort_keys=True),
             "factor_stats_json": json.dumps(factor_stats, sort_keys=True),
-            "skipped_incompatible": int(node.get("skipped_incompatible")),
-            "window": int(node.get("window")),
+            "skipped_incompatible": self._as_int(node.get("skipped_incompatible")),
+            "window": self._as_int(node.get("window")),
             "metadata_json": json.dumps(metadata, sort_keys=True),
         }
 
@@ -529,9 +849,9 @@ class AGEGraphStore:
             "category": str(node.get("category")),
             "action": str(node.get("action")),
             "centroids_json": json.dumps(centroids, sort_keys=True),
-            "decisions_count": int(node.get("decisions_count")),
-            "verified_count": int(node.get("verified_count")),
-            "iks": float(node.get("iks")),
+            "decisions_count": self._as_int(node.get("decisions_count")),
+            "verified_count": self._as_int(node.get("verified_count")),
+            "iks": self._as_float(node.get("iks")),
             "shape_json": json.dumps(shape, sort_keys=True),
             "factor_names_hash": str(node.get("factor_names_hash")),
             "metadata_json": json.dumps(metadata, sort_keys=True),
@@ -668,7 +988,7 @@ class AGEGraphStore:
             if existing_rows:
                 existing = self._node_to_dict(existing_rows[0].get("r", existing_rows[0]))
                 if str(existing.get("payload_hash")) == payload_hash:
-                    return int(existing.get("chain_index")), str(existing.get("payload_hash"))
+                    return self._as_int(existing.get("chain_index")), str(existing.get("payload_hash"))
                 raise ValueError(f"conflicting evidence receipt_intent_id: {receipt_intent_id}")
 
             duplicate_index_rows = tx.run_cypher(
@@ -751,7 +1071,15 @@ class AGEGraphStore:
 
             return chain_index, payload_hash
 
-        return self._run(self._client.run_transaction(persist))
+        result = self._run(self._client.run_transaction(persist))
+        if not (
+            isinstance(result, tuple)
+            and len(result) == 2
+            and isinstance(result[0], int)
+            and isinstance(result[1], str)
+        ):
+            raise TypeError("append_evidence_receipt transaction returned invalid result")
+        return cast(tuple[int, str], result)
 
     def write_evolution_event(
         self,
@@ -826,13 +1154,13 @@ class AGEGraphStore:
             "variant_id": str(node.get("variant_id")),
             "source_copilot": None if node.get("source_copilot") is None else str(node.get("source_copilot")),
             "source_rule": None if node.get("source_rule") is None else str(node.get("source_rule")),
-            "metric": None if node.get("metric") is None else float(node.get("metric")),
+            "metric": None if node.get("metric") is None else self._as_float(node.get("metric")),
             "shadow_batch_size": None
             if node.get("shadow_batch_size") is None
-            else int(node.get("shadow_batch_size")),
+            else self._as_int(node.get("shadow_batch_size")),
             "min_shadow_batches": None
             if node.get("min_shadow_batches") is None
-            else int(node.get("min_shadow_batches")),
+            else self._as_int(node.get("min_shadow_batches")),
             "metadata_json": json.dumps(metadata, sort_keys=True),
         }
 
@@ -1007,6 +1335,431 @@ class AGEGraphStore:
         )
         return self._int_from_rows(rows, "cnt")
 
+    def count_categories_with_n(self, domain: str, n: int = 1) -> int:
+        threshold = max(int(n), 0)
+        rows = self._run_query(
+            f"""
+            MATCH (d:Decision)-[:HAS_OUTCOME]->(o:Outcome)
+            WHERE d.domain = {self._S(domain)}
+            WITH d.category AS category, count(o) AS outcome_count
+            WHERE outcome_count >= {threshold}
+            RETURN count(category) AS cnt
+            """
+        )
+        return self._int_from_rows(rows, "cnt")
+
+    def update_centroid(
+        self,
+        domain: str,
+        category: str,
+        action: str,
+        centroid_vector: List[float],
+        delta_norm: float,
+        caused_by_decision_id: str | None = None,
+    ) -> None:
+        domain_value = str(domain)
+        category_value = str(category)
+        action_value = str(action)
+        vector = self._normalize_centroid_vector(centroid_vector)
+        delta_value = float(delta_norm)
+        updated_at_epoch = time.time()
+        vector_json = json.dumps(vector, separators=(",", ":"))
+        caused_by_value = None if caused_by_decision_id is None else str(caused_by_decision_id)
+        props = (
+            "{"
+            f"domain: {self._S(domain_value)}, "
+            f"category: {self._S(category_value)}, "
+            f"action: {self._S(action_value)}, "
+            f"vector_json: {self._S(vector_json)}, "
+            f"delta_norm: {delta_value}, "
+            f"caused_by_decision_id: {self._S(caused_by_value)}, "
+            f"updated_at_epoch: {updated_at_epoch}"
+            "}"
+        )
+        self._run_query(
+            f"""
+            MATCH (c:L5Centroid)
+            WHERE c.domain = {self._S(domain_value)}
+              AND c.category = {self._S(category_value)}
+              AND c.action = {self._S(action_value)}
+            DELETE c
+            """
+        )
+        self._run_query(f"CREATE (c:L5Centroid {props}) RETURN c")
+        if caused_by_value:
+            try:
+                self._run_query(
+                    f"""
+                    MATCH (c:L5Centroid)
+                    WHERE c.domain = {self._S(domain_value)}
+                      AND c.category = {self._S(category_value)}
+                      AND c.action = {self._S(action_value)}
+                    MATCH (d:Decision {{decision_id: {self._S(caused_by_value)}}})
+                    CREATE (c)-[:SHAPED_BY]->(d)
+                    RETURN c, d
+                    """
+                )
+            except Exception as exc:
+                log.warning(
+                    "L5Centroid SHAPED_BY edge creation failed for decision_id=%s: %s",
+                    caused_by_value,
+                    exc,
+                )
+
+    def get_centroids(self, domain: str) -> List[Dict[str, object]]:
+        rows = self._run_query(
+            f"""
+            MATCH (c:L5Centroid)
+            WHERE c.domain = {self._S(str(domain))}
+            RETURN c.category AS category,
+                   c.action AS action,
+                   c.vector_json AS vector_json,
+                   c.delta_norm AS delta_norm,
+                   c.caused_by_decision_id AS caused_by_decision_id,
+                   c.updated_at_epoch AS updated_at_epoch
+            ORDER BY category, action, updated_at_epoch DESC, caused_by_decision_id DESC
+            """
+        )
+        latest_by_identity: Dict[tuple[object, object], Dict[str, object]] = {}
+        for row in rows:
+            vector_json = row.get("vector_json")
+            if vector_json is None and "c" in row:
+                node = self._node_to_dict(row.get("c"))
+                vector_json = node.get("vector_json")
+                row = {
+                    "category": node.get("category"),
+                    "action": node.get("action"),
+                    "vector_json": vector_json,
+                    "delta_norm": node.get("delta_norm"),
+                    "caused_by_decision_id": node.get("caused_by_decision_id"),
+                    "updated_at_epoch": node.get("updated_at_epoch"),
+                }
+            identity = (row.get("category"), row.get("action"))
+            current = latest_by_identity.get(identity)
+            if current is not None and self._sort_key(current.get("updated_at_epoch")) >= self._sort_key(
+                row.get("updated_at_epoch")
+            ):
+                continue
+            latest_by_identity[identity] = row
+        centroids: List[Dict[str, object]] = []
+        for row in sorted(latest_by_identity.values(), key=lambda item: (str(item.get("category")), str(item.get("action")))):
+            vector_json = row.get("vector_json")
+            if not isinstance(vector_json, str):
+                raise TypeError("L5Centroid vector_json must be a JSON string")
+            vector = [float(value) for value in json.loads(vector_json)]
+            centroids.append(
+                {
+                    "category": row.get("category"),
+                    "action": row.get("action"),
+                    "vector_json": vector,
+                    "delta_norm": self._as_float(row.get("delta_norm")),
+                    "caused_by_decision_id": row.get("caused_by_decision_id"),
+                    "updated_at": row.get("updated_at_epoch"),
+                }
+            )
+        return centroids
+
+    def update_dk_weights(
+        self,
+        domain: str,
+        weight_tensor: List[List[float]],
+        n_decisions_used: int,
+        computed_at: float,
+    ) -> None:
+        domain_value = str(domain)
+        tensor = self._normalize_dk_weight_tensor(weight_tensor)
+        decisions_used = self._normalize_n_decisions_used(n_decisions_used)
+        computed_at_value = self._normalize_computed_at(computed_at)
+        weight_json = json.dumps(tensor, separators=(",", ":"))
+        created_at = time.time()
+        dk_weight_id = f"{domain_value}:dkw:{uuid.uuid4().hex[:12]}"
+        archive_id = f"{domain_value}:dkw_archive:{uuid.uuid4().hex[:12]}"
+        current_rows = self._run_query(
+            f"""
+            MATCH (w:L5DKWeight)
+            WHERE w.domain = {self._S(domain_value)}
+            RETURN w
+            LIMIT 1
+            """
+        )
+        previous = self._node_to_dict(current_rows[0].get("w", current_rows[0])) if current_rows else None
+        supersedes_id = archive_id if previous else None
+        current_props = (
+            "{"
+            f"dk_weight_id: {self._S(dk_weight_id)}, "
+            f"domain: {self._S(domain_value)}, "
+            f"weight_json: {self._S(weight_json)}, "
+            f"n_decisions_used: {decisions_used}, "
+            f"computed_at: {computed_at_value}, "
+            f"created_at: {created_at}, "
+            f"supersedes_id: {self._S(supersedes_id)}"
+            "}"
+        )
+
+        def persist(tx) -> None:
+            if previous:
+                archive_props = (
+                    "{"
+                    f"archive_id: {self._S(archive_id)}, "
+                    f"domain: {self._S(str(previous.get('domain') or domain_value))}, "
+                    f"dk_weight_id: {self._S(str(previous.get('dk_weight_id') or ''))}, "
+                    f"weight_json: {self._S(str(previous.get('weight_json') or '[]'))}, "
+                    f"n_decisions_used: {int(previous.get('n_decisions_used') or 0)}, "
+                    f"computed_at: {float(previous.get('computed_at') or 0.0)}, "
+                    f"created_at: {float(previous.get('created_at') or 0.0)}, "
+                    f"archived_at_epoch: {created_at}"
+                    "}"
+                )
+                tx.run_cypher(f"CREATE (a:L5DKWeightArchive {archive_props}) RETURN a")
+                tx.run_cypher(
+                    f"""
+                    MATCH (w:L5DKWeight)-[r:SUPERSEDES]->()
+                    WHERE w.domain = {self._S(domain_value)}
+                    DELETE r
+                    """
+                )
+                tx.run_cypher(
+                    f"""
+                    MATCH (w:L5DKWeight)
+                    WHERE w.domain = {self._S(domain_value)}
+                    DELETE w
+                    """
+                )
+            else:
+                tx.run_cypher(
+                    f"""
+                    MATCH (w:L5DKWeight)
+                    WHERE w.domain = {self._S(domain_value)}
+                    DELETE w
+                    """
+                )
+            tx.run_cypher(f"CREATE (w:L5DKWeight {current_props}) RETURN w")
+            if previous:
+                tx.run_cypher(
+                    f"""
+                    MATCH (w:L5DKWeight {{dk_weight_id: {self._S(dk_weight_id)}}})
+                    MATCH (a:L5DKWeightArchive {{archive_id: {self._S(archive_id)}}})
+                    CREATE (w)-[:SUPERSEDES]->(a)
+                    RETURN w, a
+                    """
+                )
+
+        self._run(self._client.run_transaction(persist))
+
+    def get_dk_weights(self, domain: str) -> Dict[str, object] | None:
+        rows = self._run_query(
+            f"""
+            MATCH (w:L5DKWeight)
+            WHERE w.domain = {self._S(str(domain))}
+            RETURN w.domain AS domain,
+                   w.dk_weight_id AS dk_weight_id,
+                   w.weight_json AS weight_json,
+                   w.n_decisions_used AS n_decisions_used,
+                   w.computed_at AS computed_at,
+                   w.created_at AS created_at,
+                   w.supersedes_id AS supersedes_id
+            ORDER BY created_at DESC, dk_weight_id DESC
+            LIMIT 1
+            """
+        )
+        row = self._latest_row(rows, "created_at", "dk_weight_id")
+        if row is None:
+            return None
+        weight_json = row.get("weight_json")
+        if weight_json is None and "w" in row:
+            node = self._node_to_dict(row.get("w"))
+            weight_json = node.get("weight_json")
+            row = {
+                "domain": node.get("domain"),
+                "dk_weight_id": node.get("dk_weight_id"),
+                "weight_json": weight_json,
+                "n_decisions_used": node.get("n_decisions_used"),
+                "computed_at": node.get("computed_at"),
+                "created_at": node.get("created_at"),
+                "supersedes_id": node.get("supersedes_id"),
+            }
+        if not isinstance(weight_json, str):
+            raise TypeError("L5DKWeight weight_json must be a JSON string")
+        tensor = self._normalize_dk_weight_tensor(json.loads(weight_json))
+        return {
+            "domain": row.get("domain"),
+            "weight_json": tensor,
+            "n_decisions_used": int(row.get("n_decisions_used") or 0),
+            "computed_at": float(row.get("computed_at") or 0.0),
+            "created_at": row.get("created_at"),
+            "supersedes_id": row.get("supersedes_id"),
+        }
+
+    def update_conservation_state(
+        self,
+        domain: str,
+        status: str,
+        alpha: float,
+        q: float,
+        V: int,
+        theta_min: float,
+        product: float,
+        categories_total: int,
+        categories_with_data: int,
+        baseline_product: float,
+        relative_threshold: float,
+        complacency_flag: str,
+        caused_by_decision_id: str | None = None,
+        old_status: str | None = None,
+    ) -> str:
+        state = self._normalize_conservation_state_values(
+            domain=domain,
+            status=status,
+            alpha=alpha,
+            q=q,
+            V=V,
+            theta_min=theta_min,
+            product=product,
+            categories_total=categories_total,
+            categories_with_data=categories_with_data,
+            baseline_product=baseline_product,
+            relative_threshold=relative_threshold,
+            complacency_flag=complacency_flag,
+            caused_by_decision_id=caused_by_decision_id,
+            old_status=old_status,
+        )
+        domain_value = cast(str, state["domain"])
+        state_id = f"{domain_value}:conservation:{uuid.uuid4().hex[:12]}"
+        updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        props = (
+            "{"
+            f"id: {self._S(state_id)}, "
+            f"domain: {self._S(domain_value)}, "
+            f"status: {self._S(state['status'])}, "
+            f"alpha: {state['alpha']}, "
+            f"q: {state['q']}, "
+            f"V: {state['V']}, "
+            f"theta_min: {state['theta_min']}, "
+            f"product: {state['product']}, "
+            f"categories_total: {state['categories_total']}, "
+            f"categories_with_data: {state['categories_with_data']}, "
+            f"baseline_product: {state['baseline_product']}, "
+            f"relative_threshold: {state['relative_threshold']}, "
+            f"complacency_flag: {self._S(state['complacency_flag'])}, "
+            f"caused_by_decision_id: {self._S(state['caused_by_decision_id'])}, "
+            f"old_status: {self._S(state['old_status'])}, "
+            f"updated_at: {self._S(updated_at)}"
+            "}"
+        )
+        self._run_query(
+            f"""
+            MATCH (cs:L5ConservationState)-[r:TRIGGERED_BY]->()
+            WHERE cs.domain = {self._S(domain_value)}
+            DELETE r
+            """
+        )
+        self._run_query(
+            f"""
+            MATCH (cs:L5ConservationState)
+            WHERE cs.domain = {self._S(domain_value)}
+            DELETE cs
+            """
+        )
+        self._run_query(f"CREATE (cs:L5ConservationState {props}) RETURN cs")
+        old_status_value = cast(str | None, state["old_status"])
+        caused_by_value = cast(str | None, state["caused_by_decision_id"])
+        if old_status_value is not None and old_status_value != state["status"] and caused_by_value:
+            try:
+                rows = self._run_query(
+                    f"""
+                    MATCH (cs:L5ConservationState {{id: {self._S(state_id)}}})
+                    MATCH (d:Decision {{decision_id: {self._S(caused_by_value)}}})
+                    WHERE d.domain = {self._S(domain_value)}
+                    CREATE (cs)-[:TRIGGERED_BY {{
+                        old_status: {self._S(old_status_value)},
+                        new_status: {self._S(state['status'])},
+                        timestamp: {self._S(updated_at)}
+                    }}]->(d)
+                    RETURN cs, d
+                    """
+                )
+                if not rows:
+                    log.warning(
+                        "L5ConservationState TRIGGERED_BY decision not found for domain=%s decision_id=%s",
+                        domain_value,
+                        caused_by_value,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "L5ConservationState TRIGGERED_BY edge creation failed for domain=%s decision_id=%s: %s",
+                    domain_value,
+                    caused_by_value,
+                    exc,
+                )
+        return state_id
+
+    def get_conservation_state(self, domain: str) -> Dict[str, object] | None:
+        rows = self._run_query(
+            f"""
+            MATCH (cs:L5ConservationState)
+            WHERE cs.domain = {self._S(str(domain))}
+            RETURN cs.id AS id,
+                   cs.domain AS domain,
+                   cs.status AS status,
+                   cs.alpha AS alpha,
+                   cs.q AS q,
+                   cs.V AS V,
+                   cs.theta_min AS theta_min,
+                   cs.product AS product,
+                   cs.categories_total AS categories_total,
+                   cs.categories_with_data AS categories_with_data,
+                   cs.baseline_product AS baseline_product,
+                     cs.relative_threshold AS relative_threshold,
+                     cs.complacency_flag AS complacency_flag,
+                     cs.caused_by_decision_id AS caused_by_decision_id,
+                     cs.old_status AS old_status,
+                     cs.updated_at AS updated_at
+              ORDER BY updated_at DESC, id DESC
+              LIMIT 1
+              """
+        )
+        row = self._latest_row(rows, "updated_at", "id")
+        if row is None:
+            return None
+        if row.get("id") is None and "cs" in row:
+            node = self._node_to_dict(row.get("cs"))
+            row = node
+        state = self._normalize_conservation_state_values(
+            domain=self._require_field(row, "domain"),
+            status=self._require_field(row, "status"),
+            alpha=self._require_field(row, "alpha"),
+            q=self._require_field(row, "q"),
+            V=self._require_field(row, "V"),
+            theta_min=self._require_field(row, "theta_min"),
+            product=self._require_field(row, "product"),
+            categories_total=self._require_field(row, "categories_total"),
+            categories_with_data=self._require_field(row, "categories_with_data"),
+            baseline_product=self._require_field(row, "baseline_product"),
+            relative_threshold=self._require_field(row, "relative_threshold"),
+            complacency_flag=self._require_field(row, "complacency_flag"),
+            caused_by_decision_id=row.get("caused_by_decision_id"),
+            old_status=row.get("old_status"),
+        )
+        updated_at = self._require_field(row, "updated_at")
+        return {
+            "id": None if row.get("id") is None else str(row.get("id")),
+            "domain": state["domain"],
+            "status": state["status"],
+            "alpha": state["alpha"],
+            "q": state["q"],
+            "V": state["V"],
+            "theta_min": state["theta_min"],
+            "product": state["product"],
+            "categories_total": state["categories_total"],
+            "categories_with_data": state["categories_with_data"],
+            "baseline_product": state["baseline_product"],
+            "relative_threshold": state["relative_threshold"],
+            "complacency_flag": state["complacency_flag"],
+            "caused_by_decision_id": state["caused_by_decision_id"],
+            "old_status": state["old_status"],
+            "updated_at": str(updated_at),
+        }
+
     def get_all_decisions(self, domain: str) -> List[Dict[str, Any]]:
         return self.get_decisions(domain)
 
@@ -1073,8 +1826,8 @@ class AGEGraphStore:
         self,
         domain: str,
         event_type: str,
-        rule_name: str = "",
-        variant_id: str = "",
+        rule_name: str,
+        variant_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         metadata_json = json.dumps(metadata or {}, sort_keys=True)
@@ -1317,6 +2070,10 @@ class AGEGraphStore:
                 "ConservationStatus",
                 "Fingerprint",
                 "CentroidCheckpoint",
+                "L5Centroid",
+                "L5DKWeight",
+                "L5DKWeightArchive",
+                "L5ConservationState",
                 "EvolutionEvent",
             ):
                 self._delete_domain_label(tx, label, domain)
@@ -1346,6 +2103,30 @@ class AGEGraphStore:
             MATCH (d:Decision)-[r:HAS_OUTCOME]->(o:Outcome)
             WHERE d.domain = {self._S(domain)}
                OR o.domain = {self._S(domain)}
+            DELETE r
+            """
+        )
+        tx.run_cypher(
+            f"""
+            MATCH (c:L5Centroid)-[r:SHAPED_BY]->(d:Decision)
+            WHERE c.domain = {self._S(domain)}
+               OR d.domain = {self._S(domain)}
+            DELETE r
+            """
+        )
+        tx.run_cypher(
+            f"""
+            MATCH (w:L5DKWeight)-[r:SUPERSEDES]->(a:L5DKWeightArchive)
+            WHERE w.domain = {self._S(domain)}
+               OR a.domain = {self._S(domain)}
+            DELETE r
+            """
+        )
+        tx.run_cypher(
+            f"""
+            MATCH (cs:L5ConservationState)-[r:TRIGGERED_BY]->(d:Decision)
+            WHERE cs.domain = {self._S(domain)}
+               OR d.domain = {self._S(domain)}
             DELETE r
             """
         )

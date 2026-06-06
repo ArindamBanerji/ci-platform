@@ -65,6 +65,109 @@ class FakeGraphStore:
         self.calls.append(("count_decisions", domain))
         return len(self.decisions)
 
+    def count_categories_with_n(self, domain, n=1):
+        self.calls.append(("count_categories_with_n", domain, n))
+        return 2
+
+    def update_centroid(self, domain, category, action, centroid_vector, delta_norm, caused_by_decision_id=None):
+        self.calls.append(
+            (
+                "update_centroid",
+                domain,
+                category,
+                action,
+                centroid_vector,
+                delta_norm,
+                caused_by_decision_id,
+            )
+        )
+
+    def get_centroids(self, domain):
+        self.calls.append(("get_centroids", domain))
+        return [
+            {
+                "category": "price_variance",
+                "action": "hold_for_review",
+                "vector_json": [0.1, 0.2],
+                "delta_norm": 0.3,
+                "caused_by_decision_id": "DEC-1",
+                "updated_at": 123.4,
+            }
+        ]
+
+    def update_dk_weights(self, domain, weight_tensor, n_decisions_used, computed_at):
+        self.calls.append(("update_dk_weights", domain, weight_tensor, n_decisions_used, computed_at))
+
+    def get_dk_weights(self, domain):
+        self.calls.append(("get_dk_weights", domain))
+        return {
+            "domain": domain,
+            "weight_json": [[0.1, 0.2]],
+            "n_decisions_used": 3,
+            "computed_at": 123.4,
+            "created_at": 456.7,
+            "supersedes_id": None,
+        }
+
+    def update_conservation_state(
+        self,
+        domain,
+        status,
+        alpha,
+        q,
+        V,
+        theta_min,
+        product,
+        categories_total,
+        categories_with_data,
+        baseline_product,
+        relative_threshold,
+        complacency_flag,
+        caused_by_decision_id=None,
+        old_status=None,
+    ):
+        self.calls.append(
+            (
+                "update_conservation_state",
+                domain,
+                status,
+                alpha,
+                q,
+                V,
+                theta_min,
+                product,
+                categories_total,
+                categories_with_data,
+                baseline_product,
+                relative_threshold,
+                complacency_flag,
+                caused_by_decision_id,
+                old_status,
+            )
+        )
+        return "soc:conservation:1"
+
+    def get_conservation_state(self, domain):
+        self.calls.append(("get_conservation_state", domain))
+        return {
+            "id": "soc:conservation:1",
+            "domain": domain,
+            "status": "GREEN",
+            "alpha": 0.25,
+            "q": 0.8,
+            "V": 42,
+            "theta_min": 23.53,
+            "product": 18.824,
+            "categories_total": 6,
+            "categories_with_data": 4,
+            "baseline_product": 20.0,
+            "relative_threshold": 0.9412,
+            "complacency_flag": "false",
+            "caused_by_decision_id": "DEC-1",
+            "old_status": "AMBER",
+            "updated_at": "2026-06-05T00:00:00Z",
+        }
+
     def save_centroids(self, domain, category, centroids, metadata=None, **kwargs):
         self.calls.append(("save_centroids", domain, category, centroids, metadata, kwargs))
 
@@ -223,6 +326,8 @@ def test_adapter_delegates_counts_and_reads():
     assert adapter.count_verified("soc") == 1
     assert adapter.count_correct("soc") == 1
     assert adapter.count_decisions("soc") == 1
+    assert adapter.count_categories_with_n("soc", n=3) == 2
+    assert store.calls[-1] == ("count_categories_with_n", "soc", 3)
 
 
 def test_adapter_delegates_centroids_and_evolution_events():
@@ -258,6 +363,188 @@ def test_adapter_delegates_centroids_and_evolution_events():
     assert ("get_evolution_events", "soc", {"event_type": "variant_generated"}) in store.calls
     assert ("archive_old_decisions", "soc", 800) in store.calls
     assert ("count_archived", "soc") in store.calls
+
+
+def test_adapter_delegates_l5_centroid_methods():
+    from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
+
+    store = FakeGraphStore()
+    adapter = AGEGraphStoreAdapter(store=store)
+
+    adapter.update_centroid(
+        "soc",
+        "price_variance",
+        "hold_for_review",
+        [0.1, 0.2],
+        0.3,
+        caused_by_decision_id="DEC-1",
+    )
+    rows = adapter.get_centroids("soc")
+
+    assert (
+        "update_centroid",
+        "soc",
+        "price_variance",
+        "hold_for_review",
+        [0.1, 0.2],
+        0.3,
+        "DEC-1",
+    ) in store.calls
+    assert ("get_centroids", "soc") in store.calls
+    assert rows == [
+        {
+            "category": "price_variance",
+            "action": "hold_for_review",
+            "vector_json": [0.1, 0.2],
+            "delta_norm": 0.3,
+            "caused_by_decision_id": "DEC-1",
+            "updated_at": 123.4,
+        }
+    ]
+
+
+def test_adapter_l5_centroid_signatures():
+    from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
+
+    assert list(inspect.signature(AGEGraphStoreAdapter.update_centroid).parameters) == [
+        "self",
+        "domain",
+        "category",
+        "action",
+        "centroid_vector",
+        "delta_norm",
+        "caused_by_decision_id",
+    ]
+    assert list(inspect.signature(AGEGraphStoreAdapter.get_centroids).parameters) == [
+        "self",
+        "domain",
+    ]
+
+
+def test_adapter_delegates_l5_dk_weight_methods():
+    from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
+
+    store = FakeGraphStore()
+    adapter = AGEGraphStoreAdapter(store=store)
+
+    adapter.update_dk_weights("soc", [[0.1, 0.2]], 3, 123.4)
+    row = adapter.get_dk_weights("soc")
+
+    assert ("update_dk_weights", "soc", [[0.1, 0.2]], 3, 123.4) in store.calls
+    assert ("get_dk_weights", "soc") in store.calls
+    assert row == {
+        "domain": "soc",
+        "weight_json": [[0.1, 0.2]],
+        "n_decisions_used": 3,
+        "computed_at": 123.4,
+        "created_at": 456.7,
+        "supersedes_id": None,
+    }
+
+
+def test_adapter_l5_dk_weight_signatures():
+    from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
+
+    assert list(inspect.signature(AGEGraphStoreAdapter.update_dk_weights).parameters) == [
+        "self",
+        "domain",
+        "weight_tensor",
+        "n_decisions_used",
+        "computed_at",
+    ]
+    assert list(inspect.signature(AGEGraphStoreAdapter.get_dk_weights).parameters) == [
+        "self",
+        "domain",
+    ]
+
+
+def test_adapter_delegates_l5_conservation_state_methods():
+    from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
+
+    store = FakeGraphStore()
+    adapter = AGEGraphStoreAdapter(store=store)
+
+    state_id = adapter.update_conservation_state(
+        "soc",
+        "GREEN",
+        0.25,
+        0.8,
+        42,
+        23.53,
+        18.824,
+        6,
+        4,
+        20.0,
+        0.9412,
+        "false",
+        caused_by_decision_id="DEC-1",
+        old_status="AMBER",
+    )
+    row = adapter.get_conservation_state("soc")
+
+    assert state_id == "soc:conservation:1"
+    assert (
+        "update_conservation_state",
+        "soc",
+        "GREEN",
+        0.25,
+        0.8,
+        42,
+        23.53,
+        18.824,
+        6,
+        4,
+        20.0,
+        0.9412,
+        "false",
+        "DEC-1",
+        "AMBER",
+    ) in store.calls
+    assert ("get_conservation_state", "soc") in store.calls
+    assert row == {
+        "id": "soc:conservation:1",
+        "domain": "soc",
+        "status": "GREEN",
+        "alpha": 0.25,
+        "q": 0.8,
+        "V": 42,
+        "theta_min": 23.53,
+        "product": 18.824,
+        "categories_total": 6,
+        "categories_with_data": 4,
+        "baseline_product": 20.0,
+        "relative_threshold": 0.9412,
+        "complacency_flag": "false",
+        "caused_by_decision_id": "DEC-1",
+        "old_status": "AMBER",
+        "updated_at": "2026-06-05T00:00:00Z",
+    }
+
+
+def test_adapter_l5_conservation_state_signatures():
+    from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
+
+    assert list(inspect.signature(AGEGraphStoreAdapter.update_conservation_state).parameters) == [
+        "self",
+        "domain",
+        "status",
+        "alpha",
+        "q",
+        "V",
+        "theta_min",
+        "product",
+        "categories_total",
+        "categories_with_data",
+        "baseline_product",
+        "relative_threshold",
+        "complacency_flag",
+        "caused_by_decision_id",
+        "old_status",
+    ]
+    assert list(inspect.signature(AGEGraphStoreAdapter.get_conservation_state).parameters) == [
+        "self",
+        "domain",
+    ]
 
 
 def test_adapter_delegates_decision_entity_links():

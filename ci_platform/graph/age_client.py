@@ -390,7 +390,11 @@ class AGEClient:
             return result
 
     async def run_transaction(self, operation: Callable[["AGETransaction"], T]) -> T:
-        return await asyncio.to_thread(self._sync_transaction, operation)
+        result = await asyncio.to_thread(
+            cast(Callable[[Callable[["AGETransaction"], T]], T], self._sync_transaction),
+            operation,
+        )
+        return result
 
     async def run_query(
         self,
