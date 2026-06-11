@@ -95,8 +95,31 @@ class FakeGraphStore:
             }
         ]
 
-    def update_dk_weights(self, domain, weight_tensor, n_decisions_used, computed_at):
-        self.calls.append(("update_dk_weights", domain, weight_tensor, n_decisions_used, computed_at))
+    def update_dk_weights(
+        self,
+        domain,
+        weight_tensor,
+        n_decisions_used,
+        computed_at,
+        *,
+        welford_state=None,
+        n_confirmed=None,
+        n_overridden=None,
+        entity_group=None,
+    ):
+        self.calls.append(
+            (
+                "update_dk_weights",
+                domain,
+                weight_tensor,
+                n_decisions_used,
+                computed_at,
+                welford_state,
+                n_confirmed,
+                n_overridden,
+                entity_group,
+            )
+        )
 
     def get_dk_weights(self, domain):
         self.calls.append(("get_dk_weights", domain))
@@ -107,6 +130,10 @@ class FakeGraphStore:
             "computed_at": 123.4,
             "created_at": 456.7,
             "supersedes_id": None,
+            "welford_state": None,
+            "n_confirmed": None,
+            "n_overridden": None,
+            "entity_group": None,
         }
 
     def update_conservation_state(
@@ -427,10 +454,38 @@ def test_adapter_delegates_l5_dk_weight_methods():
     store = FakeGraphStore()
     adapter = AGEGraphStoreAdapter(store=store)
 
-    adapter.update_dk_weights("soc", [[0.1, 0.2]], 3, 123.4)
+    welford_state = {
+        "confirmed_mean": [0.1],
+        "confirmed_m2": [1.0],
+        "overridden_mean": [0.2],
+        "overridden_m2": [2.0],
+        "all_mean": [0.3],
+        "all_m2": [3.0],
+        "n_all": 3,
+    }
+    adapter.update_dk_weights(
+        "soc",
+        [[0.1, 0.2]],
+        3,
+        123.4,
+        welford_state=welford_state,
+        n_confirmed=2,
+        n_overridden=1,
+        entity_group="supplier",
+    )
     row = adapter.get_dk_weights("soc")
 
-    assert ("update_dk_weights", "soc", [[0.1, 0.2]], 3, 123.4) in store.calls
+    assert (
+        "update_dk_weights",
+        "soc",
+        [[0.1, 0.2]],
+        3,
+        123.4,
+        welford_state,
+        2,
+        1,
+        "supplier",
+    ) in store.calls
     assert ("get_dk_weights", "soc") in store.calls
     assert row == {
         "domain": "soc",
@@ -439,6 +494,10 @@ def test_adapter_delegates_l5_dk_weight_methods():
         "computed_at": 123.4,
         "created_at": 456.7,
         "supersedes_id": None,
+        "welford_state": None,
+        "n_confirmed": None,
+        "n_overridden": None,
+        "entity_group": None,
     }
 
 
@@ -451,7 +510,14 @@ def test_adapter_l5_dk_weight_signatures():
         "weight_tensor",
         "n_decisions_used",
         "computed_at",
+        "welford_state",
+        "n_confirmed",
+        "n_overridden",
+        "entity_group",
     ]
+    params = inspect.signature(AGEGraphStoreAdapter.update_dk_weights).parameters
+    for name in ["welford_state", "n_confirmed", "n_overridden", "entity_group"]:
+        assert params[name].kind is inspect.Parameter.KEYWORD_ONLY
     assert list(inspect.signature(AGEGraphStoreAdapter.get_dk_weights).parameters) == [
         "self",
         "domain",

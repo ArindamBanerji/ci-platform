@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -20,6 +21,15 @@ from ci_platform.graph.age_client import AGEClient
 
 
 log = logging.getLogger(__name__)
+
+_DK_WELFORD_VECTOR_KEYS = (
+    "confirmed_mean",
+    "confirmed_m2",
+    "overridden_mean",
+    "overridden_m2",
+    "all_mean",
+    "all_m2",
+)
 
 
 class AGEGraphStore:
@@ -51,6 +61,127 @@ class AGEGraphStore:
 
     def _S(self, value: Any) -> str:
         return self._client._S(value)
+
+    def _l5_props_literal(self, properties: Mapping[str, Any]) -> str:
+        return "{" + ", ".join(f"{key}: {self._S(value)}" for key, value in properties.items()) + "}"
+
+    def _l5_where_clause(self, node_var: str, identity: Mapping[str, Any]) -> str:
+        if not identity:
+            raise ValueError("L5 current-state identity must be non-empty")
+        return " AND ".join(f"{node_var}.{key} = {self._S(value)}" for key, value in identity.items())
+
+    def _l5_set_clause(self, node_var: str, properties: Mapping[str, Any]) -> str:
+        if not properties:
+            raise ValueError("L5 current-state properties must be non-empty")
+        return ", ".join(f"{node_var}.{key} = {self._S(value)}" for key, value in properties.items())
+
+    def _l5_upsert_current(
+        self,
+        label: str,
+        identity: dict[str, object],
+        properties: dict[str, object],
+        edge_type: str | None = None,
+        edge_target_label: str = "Decision",
+        edge_target_id: dict[str, object] | None = None,
+        edge_condition: bool = True,
+    ) -> None:
+        """Upsert one current-state L5 node and optionally replace its outgoing provenance edge.
+
+        This is intentionally not atomic: AGE does not give us the constraint/merge
+        primitives needed for a single-statement upsert here. If a write fails after
+        partial progress, the next write self-heals duplicate/garbled state by
+        deleting all incident edges from duplicate nodes and creating one fresh node.
+        """
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", label):
+            raise ValueError("L5 label must be a simple Cypher label")
+        if edge_type is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", edge_type):
+            raise ValueError("L5 edge_type must be a simple Cypher relationship type")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", edge_target_label):
+            raise ValueError("L5 edge_target_label must be a simple Cypher label")
+
+        where_clause = self._l5_where_clause("n", identity)
+        existing = self._run_query(
+            f"""
+            MATCH (n:{label})
+            WHERE {where_clause}
+            RETURN n
+            """
+        )
+        all_properties = dict(identity)
+        all_properties.update(properties)
+
+        if len(existing) > 1:
+            log.warning(
+                "%s garbled current-state: %s nodes for identity=%s; cleaning up",
+                label,
+                len(existing),
+                identity,
+            )
+            self._run_query(
+                f"""
+                MATCH (n:{label})-[r]-()
+                WHERE {where_clause}
+                DELETE r
+                """
+            )
+            self._run_query(
+                f"""
+                MATCH (n:{label})
+                WHERE {where_clause}
+                DELETE n
+                """
+            )
+            existing = []
+
+        if existing:
+            set_clause = self._l5_set_clause("n", properties)
+            self._run_query(
+                f"""
+                MATCH (n:{label})
+                WHERE {where_clause}
+                SET {set_clause}
+                RETURN n
+                """
+            )
+        else:
+            self._run_query(f"CREATE (n:{label} {self._l5_props_literal(all_properties)}) RETURN n")
+
+        if edge_type and edge_condition:
+            self._run_query(
+                f"""
+                MATCH (n:{label})-[r:{edge_type}]->()
+                WHERE {where_clause}
+                DELETE r
+                """
+            )
+            if edge_target_id:
+                target_where = self._l5_where_clause("t", edge_target_id)
+                try:
+                    target_rows = self._run_query(
+                        f"""
+                        MATCH (t:{edge_target_label})
+                        WHERE {target_where}
+                        RETURN t
+                        LIMIT 1
+                        """
+                    )
+                    if not target_rows:
+                        log.warning("%s edge target not found for identity=%s", edge_type, edge_target_id)
+                        return
+                    self._run_query(
+                        f"""
+                        MATCH (n:{label})
+                        WHERE {where_clause}
+                        MATCH (t:{edge_target_label})
+                        WHERE {target_where}
+                        WITH n, t
+                        LIMIT 1
+                        CREATE (n)-[:{edge_type} {{timestamp: {self._S(str(time.time()))}}}]->(t)
+                        RETURN n, t
+                        """
+                    )
+                except Exception as exc:
+                    log.warning("%s edge creation failed for identity=%s target=%s: %s", edge_type, identity, edge_target_id, exc)
 
     @staticmethod
     def _safe_limit(limit: int, default: int = 400) -> int:
@@ -149,6 +280,99 @@ class AGEGraphStore:
             raise TypeError("computed_at must be numeric") from error
 
     @staticmethod
+    def _normalize_optional_nonnegative_int(value: Any, field_name: str) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise TypeError(f"{field_name} must be an integer")
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError) as error:
+            raise TypeError(f"{field_name} must be an integer") from error
+        if normalized < 0:
+            raise ValueError(f"{field_name} must be non-negative")
+        return normalized
+
+    @classmethod
+    def _optional_nonnegative_int_literal(cls, value: Any, field_name: str) -> str:
+        normalized = cls._normalize_optional_nonnegative_int(value, field_name)
+        return str(normalized) if normalized is not None else "null"
+
+    @staticmethod
+    def _normalize_dk_welford_vector(vector: Any, field_name: str) -> List[float]:
+        if isinstance(vector, (str, bytes, bytearray)):
+            raise TypeError(f"{field_name} must be a non-string 1D numeric iterable")
+        if isinstance(vector, Mapping):
+            raise TypeError(f"{field_name} must be a non-mapping 1D numeric iterable")
+        if not isinstance(vector, Iterable):
+            raise TypeError(f"{field_name} must be a 1D numeric iterable")
+        try:
+            normalized = [float(value) for value in vector]
+        except (TypeError, ValueError) as error:
+            raise TypeError(f"{field_name} must contain only numeric values") from error
+        if not normalized:
+            raise ValueError(f"{field_name} must be non-empty")
+        return normalized
+
+    @classmethod
+    def _normalize_dk_welford_state(
+        cls,
+        welford_state: Any,
+        *,
+        n_decisions_used: int,
+    ) -> Dict[str, object] | None:
+        if welford_state is None:
+            return None
+        if not isinstance(welford_state, Mapping):
+            raise TypeError("welford_state must be a mapping")
+        missing = [key for key in (*_DK_WELFORD_VECTOR_KEYS, "n_all") if key not in welford_state]
+        if missing:
+            raise ValueError(f"welford_state missing required fields: {', '.join(missing)}")
+        normalized: Dict[str, object] = {}
+        expected_width: int | None = None
+        for key in _DK_WELFORD_VECTOR_KEYS:
+            vector = cls._normalize_dk_welford_vector(welford_state[key], key)
+            if expected_width is None:
+                expected_width = len(vector)
+            elif len(vector) != expected_width:
+                raise ValueError("welford_state vectors must have equal length")
+            normalized[key] = vector
+        n_all = cls._normalize_optional_nonnegative_int(welford_state["n_all"], "n_all")
+        if n_all is None:
+            raise TypeError("n_all must be an integer")
+        if n_all != n_decisions_used:
+            raise ValueError("welford_state n_all must equal n_decisions_used")
+        normalized["n_all"] = n_all
+        return normalized
+
+    @classmethod
+    def _decode_dk_welford_state(
+        cls,
+        row: Mapping[str, Any],
+        *,
+        n_decisions_used: int,
+    ) -> Dict[str, object] | None:
+        json_fields = {key: f"{key}_json" for key in _DK_WELFORD_VECTOR_KEYS}
+        if not any(row.get(field) is not None for field in json_fields.values()):
+            return None
+        state: Dict[str, object] = {}
+        for key, field in json_fields.items():
+            raw_value = row.get(field)
+            if raw_value is None:
+                raise ValueError("stored DK Welford state is partial")
+            state[key] = cls._decode_json_array_field(raw_value, field)
+        state["n_all"] = n_decisions_used
+        return cls._normalize_dk_welford_state(state, n_decisions_used=n_decisions_used)
+
+    @staticmethod
+    def _decode_json_array_field(value: Any, field_name: str) -> Any:
+        if isinstance(value, str):
+            return json.loads(value)
+        if isinstance(value, list):
+            return value
+        raise TypeError(f"{field_name} must be a JSON string or decoded JSON list")
+
+    @staticmethod
     def _sort_key(value: Any) -> tuple[int, Any]:
         if value is None:
             return (0, "")
@@ -187,6 +411,8 @@ class AGEGraphStore:
             normalized = float(value)
         except (TypeError, ValueError) as error:
             raise TypeError(f"{field_name} must be numeric") from error
+        if math.isnan(normalized):
+            raise ValueError(f"{field_name} cannot be NaN")
         if normalized < 0.0 or normalized > 1.0:
             raise ValueError(f"{field_name} must be between 0.0 and 1.0")
         return normalized
@@ -194,9 +420,19 @@ class AGEGraphStore:
     @staticmethod
     def _normalize_float(value: Any, field_name: str) -> float:
         try:
-            return float(value)
+            normalized = float(value)
         except (TypeError, ValueError) as error:
             raise TypeError(f"{field_name} must be numeric") from error
+        if math.isnan(normalized):
+            raise ValueError(f"{field_name} cannot be NaN")
+        return normalized
+
+    @classmethod
+    def _normalize_finite_float(cls, value: Any, field_name: str) -> float:
+        normalized = cls._normalize_float(value, field_name)
+        if not math.isfinite(normalized):
+            raise ValueError(f"{field_name} must be finite")
+        return normalized
 
     @classmethod
     def _normalize_positive_float(cls, value: Any, field_name: str) -> float:
@@ -204,6 +440,22 @@ class AGEGraphStore:
         if normalized <= 0.0:
             raise ValueError(f"{field_name} must be greater than 0")
         return normalized
+
+    def _conservation_float_literal(self, value: Any, field_name: str) -> str:
+        normalized = self._normalize_float(value, field_name)
+        if math.isinf(normalized):
+            if normalized > 0:
+                return self._S("Infinity")
+            return self._S("-Infinity")
+        return str(normalized)
+
+    @classmethod
+    def _decode_conservation_float(cls, value: Any, field_name: str) -> float:
+        if value == "Infinity":
+            return float("inf")
+        if value == "-Infinity":
+            return float("-inf")
+        return cls._normalize_float(value, field_name)
 
     @staticmethod
     def _normalize_non_negative_int(value: Any, field_name: str) -> int:
@@ -271,11 +523,11 @@ class AGEGraphStore:
             "q": cls._normalize_bounded_float(q, "q"),
             "V": cls._normalize_non_negative_int(V, "V"),
             "theta_min": cls._normalize_positive_float(theta_min, "theta_min"),
-            "product": cls._normalize_float(product, "product"),
+            "product": cls._normalize_finite_float(product, "product"),
             "categories_total": categories_total_value,
             "categories_with_data": categories_with_data_value,
-            "baseline_product": cls._normalize_float(baseline_product, "baseline_product"),
-            "relative_threshold": cls._normalize_float(
+            "baseline_product": cls._normalize_finite_float(baseline_product, "baseline_product"),
+            "relative_threshold": cls._normalize_finite_float(
                 relative_threshold, "relative_threshold"
             ),
             "complacency_flag": cls._normalize_complacency_flag(complacency_flag),
@@ -502,7 +754,8 @@ class AGEGraphStore:
             f"recommended_action: {self._S(action)}, "
             f"confidence: {confidence}, "
             f"factors: {self._S(factors_json)}, "
-            f"metadata: {self._S(metadata_json)}"
+            f"metadata: {self._S(metadata_json)}, "
+            "status: 'pending'"
             "}"
         )
 
@@ -1365,46 +1618,27 @@ class AGEGraphStore:
         updated_at_epoch = time.time()
         vector_json = json.dumps(vector, separators=(",", ":"))
         caused_by_value = None if caused_by_decision_id is None else str(caused_by_decision_id)
-        props = (
-            "{"
-            f"domain: {self._S(domain_value)}, "
-            f"category: {self._S(category_value)}, "
-            f"action: {self._S(action_value)}, "
-            f"vector_json: {self._S(vector_json)}, "
-            f"delta_norm: {delta_value}, "
-            f"caused_by_decision_id: {self._S(caused_by_value)}, "
-            f"updated_at_epoch: {updated_at_epoch}"
-            "}"
+        self._l5_upsert_current(
+            label="L5Centroid",
+            identity={
+                "domain": domain_value,
+                "category": category_value,
+                "action": action_value,
+            },
+            properties={
+                "vector_json": vector_json,
+                "delta_norm": delta_value,
+                "caused_by_decision_id": caused_by_value,
+                "updated_at_epoch": updated_at_epoch,
+            },
+            edge_type="SHAPED_BY",
+            edge_target_id=(
+                {"domain": domain_value, "decision_id": caused_by_value}
+                if caused_by_value
+                else None
+            ),
+            edge_condition=True,
         )
-        self._run_query(
-            f"""
-            MATCH (c:L5Centroid)
-            WHERE c.domain = {self._S(domain_value)}
-              AND c.category = {self._S(category_value)}
-              AND c.action = {self._S(action_value)}
-            DELETE c
-            """
-        )
-        self._run_query(f"CREATE (c:L5Centroid {props}) RETURN c")
-        if caused_by_value:
-            try:
-                self._run_query(
-                    f"""
-                    MATCH (c:L5Centroid)
-                    WHERE c.domain = {self._S(domain_value)}
-                      AND c.category = {self._S(category_value)}
-                      AND c.action = {self._S(action_value)}
-                    MATCH (d:Decision {{decision_id: {self._S(caused_by_value)}}})
-                    CREATE (c)-[:SHAPED_BY]->(d)
-                    RETURN c, d
-                    """
-                )
-            except Exception as exc:
-                log.warning(
-                    "L5Centroid SHAPED_BY edge creation failed for decision_id=%s: %s",
-                    caused_by_value,
-                    exc,
-                )
 
     def get_centroids(self, domain: str) -> List[Dict[str, object]]:
         rows = self._run_query(
@@ -1465,86 +1699,56 @@ class AGEGraphStore:
         weight_tensor: List[List[float]],
         n_decisions_used: int,
         computed_at: float,
+        *,
+        welford_state: Dict[str, object] | None = None,
+        n_confirmed: int | None = None,
+        n_overridden: int | None = None,
+        entity_group: str | None = None,
     ) -> None:
         domain_value = str(domain)
         tensor = self._normalize_dk_weight_tensor(weight_tensor)
         decisions_used = self._normalize_n_decisions_used(n_decisions_used)
         computed_at_value = self._normalize_computed_at(computed_at)
+        normalized_welford = self._normalize_dk_welford_state(
+            welford_state,
+            n_decisions_used=decisions_used,
+        )
+        confirmed_count = self._normalize_optional_nonnegative_int(n_confirmed, "n_confirmed")
+        overridden_count = self._normalize_optional_nonnegative_int(n_overridden, "n_overridden")
+        entity_group_value = None if entity_group is None else str(entity_group)
+        welford_json = {
+            key: (
+                json.dumps(normalized_welford[key], separators=(",", ":"))
+                if normalized_welford is not None
+                else None
+            )
+            for key in _DK_WELFORD_VECTOR_KEYS
+        }
         weight_json = json.dumps(tensor, separators=(",", ":"))
         created_at = time.time()
         dk_weight_id = f"{domain_value}:dkw:{uuid.uuid4().hex[:12]}"
-        archive_id = f"{domain_value}:dkw_archive:{uuid.uuid4().hex[:12]}"
-        current_rows = self._run_query(
-            f"""
-            MATCH (w:L5DKWeight)
-            WHERE w.domain = {self._S(domain_value)}
-            RETURN w
-            LIMIT 1
-            """
+        self._l5_upsert_current(
+            label="L5DKWeight",
+            identity={"domain": domain_value},
+            properties={
+                "dk_weight_id": dk_weight_id,
+                "weight_json": weight_json,
+                "n_decisions_used": decisions_used,
+                "computed_at": computed_at_value,
+                "created_at": created_at,
+                "supersedes_id": None,
+                "confirmed_mean_json": welford_json["confirmed_mean"],
+                "confirmed_m2_json": welford_json["confirmed_m2"],
+                "overridden_mean_json": welford_json["overridden_mean"],
+                "overridden_m2_json": welford_json["overridden_m2"],
+                "all_mean_json": welford_json["all_mean"],
+                "all_m2_json": welford_json["all_m2"],
+                "n_confirmed": confirmed_count,
+                "n_overridden": overridden_count,
+                "entity_group": entity_group_value,
+            },
+            edge_type=None,
         )
-        previous = self._node_to_dict(current_rows[0].get("w", current_rows[0])) if current_rows else None
-        supersedes_id = archive_id if previous else None
-        current_props = (
-            "{"
-            f"dk_weight_id: {self._S(dk_weight_id)}, "
-            f"domain: {self._S(domain_value)}, "
-            f"weight_json: {self._S(weight_json)}, "
-            f"n_decisions_used: {decisions_used}, "
-            f"computed_at: {computed_at_value}, "
-            f"created_at: {created_at}, "
-            f"supersedes_id: {self._S(supersedes_id)}"
-            "}"
-        )
-
-        def persist(tx) -> None:
-            if previous:
-                archive_props = (
-                    "{"
-                    f"archive_id: {self._S(archive_id)}, "
-                    f"domain: {self._S(str(previous.get('domain') or domain_value))}, "
-                    f"dk_weight_id: {self._S(str(previous.get('dk_weight_id') or ''))}, "
-                    f"weight_json: {self._S(str(previous.get('weight_json') or '[]'))}, "
-                    f"n_decisions_used: {int(previous.get('n_decisions_used') or 0)}, "
-                    f"computed_at: {float(previous.get('computed_at') or 0.0)}, "
-                    f"created_at: {float(previous.get('created_at') or 0.0)}, "
-                    f"archived_at_epoch: {created_at}"
-                    "}"
-                )
-                tx.run_cypher(f"CREATE (a:L5DKWeightArchive {archive_props}) RETURN a")
-                tx.run_cypher(
-                    f"""
-                    MATCH (w:L5DKWeight)-[r:SUPERSEDES]->()
-                    WHERE w.domain = {self._S(domain_value)}
-                    DELETE r
-                    """
-                )
-                tx.run_cypher(
-                    f"""
-                    MATCH (w:L5DKWeight)
-                    WHERE w.domain = {self._S(domain_value)}
-                    DELETE w
-                    """
-                )
-            else:
-                tx.run_cypher(
-                    f"""
-                    MATCH (w:L5DKWeight)
-                    WHERE w.domain = {self._S(domain_value)}
-                    DELETE w
-                    """
-                )
-            tx.run_cypher(f"CREATE (w:L5DKWeight {current_props}) RETURN w")
-            if previous:
-                tx.run_cypher(
-                    f"""
-                    MATCH (w:L5DKWeight {{dk_weight_id: {self._S(dk_weight_id)}}})
-                    MATCH (a:L5DKWeightArchive {{archive_id: {self._S(archive_id)}}})
-                    CREATE (w)-[:SUPERSEDES]->(a)
-                    RETURN w, a
-                    """
-                )
-
-        self._run(self._client.run_transaction(persist))
 
     def get_dk_weights(self, domain: str) -> Dict[str, object] | None:
         rows = self._run_query(
@@ -1557,7 +1761,16 @@ class AGEGraphStore:
                    w.n_decisions_used AS n_decisions_used,
                    w.computed_at AS computed_at,
                    w.created_at AS created_at,
-                   w.supersedes_id AS supersedes_id
+                   w.supersedes_id AS supersedes_id,
+                   w.confirmed_mean_json AS confirmed_mean_json,
+                   w.confirmed_m2_json AS confirmed_m2_json,
+                   w.overridden_mean_json AS overridden_mean_json,
+                   w.overridden_m2_json AS overridden_m2_json,
+                   w.all_mean_json AS all_mean_json,
+                   w.all_m2_json AS all_m2_json,
+                   w.n_confirmed AS n_confirmed,
+                   w.n_overridden AS n_overridden,
+                   w.entity_group AS entity_group
             ORDER BY created_at DESC, dk_weight_id DESC
             LIMIT 1
             """
@@ -1577,17 +1790,32 @@ class AGEGraphStore:
                 "computed_at": node.get("computed_at"),
                 "created_at": node.get("created_at"),
                 "supersedes_id": node.get("supersedes_id"),
+                "confirmed_mean_json": node.get("confirmed_mean_json"),
+                "confirmed_m2_json": node.get("confirmed_m2_json"),
+                "overridden_mean_json": node.get("overridden_mean_json"),
+                "overridden_m2_json": node.get("overridden_m2_json"),
+                "all_mean_json": node.get("all_mean_json"),
+                "all_m2_json": node.get("all_m2_json"),
+                "n_confirmed": node.get("n_confirmed"),
+                "n_overridden": node.get("n_overridden"),
+                "entity_group": node.get("entity_group"),
             }
-        if not isinstance(weight_json, str):
-            raise TypeError("L5DKWeight weight_json must be a JSON string")
-        tensor = self._normalize_dk_weight_tensor(json.loads(weight_json))
+        tensor = self._normalize_dk_weight_tensor(
+            self._decode_json_array_field(weight_json, "weight_json")
+        )
+        decisions_used = int(row.get("n_decisions_used") or 0)
+        welford_state = self._decode_dk_welford_state(row, n_decisions_used=decisions_used)
         return {
             "domain": row.get("domain"),
             "weight_json": tensor,
-            "n_decisions_used": int(row.get("n_decisions_used") or 0),
+            "n_decisions_used": decisions_used,
             "computed_at": float(row.get("computed_at") or 0.0),
             "created_at": row.get("created_at"),
             "supersedes_id": row.get("supersedes_id"),
+            "welford_state": welford_state,
+            "n_confirmed": self._normalize_optional_nonnegative_int(row.get("n_confirmed"), "n_confirmed"),
+            "n_overridden": self._normalize_optional_nonnegative_int(row.get("n_overridden"), "n_overridden"),
+            "entity_group": row.get("entity_group"),
         }
 
     def update_conservation_state(
@@ -1626,71 +1854,41 @@ class AGEGraphStore:
         domain_value = cast(str, state["domain"])
         state_id = f"{domain_value}:conservation:{uuid.uuid4().hex[:12]}"
         updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        props = (
-            "{"
-            f"id: {self._S(state_id)}, "
-            f"domain: {self._S(domain_value)}, "
-            f"status: {self._S(state['status'])}, "
-            f"alpha: {state['alpha']}, "
-            f"q: {state['q']}, "
-            f"V: {state['V']}, "
-            f"theta_min: {state['theta_min']}, "
-            f"product: {state['product']}, "
-            f"categories_total: {state['categories_total']}, "
-            f"categories_with_data: {state['categories_with_data']}, "
-            f"baseline_product: {state['baseline_product']}, "
-            f"relative_threshold: {state['relative_threshold']}, "
-            f"complacency_flag: {self._S(state['complacency_flag'])}, "
-            f"caused_by_decision_id: {self._S(state['caused_by_decision_id'])}, "
-            f"old_status: {self._S(state['old_status'])}, "
-            f"updated_at: {self._S(updated_at)}"
-            "}"
-        )
-        self._run_query(
-            f"""
-            MATCH (cs:L5ConservationState)-[r:TRIGGERED_BY]->()
-            WHERE cs.domain = {self._S(domain_value)}
-            DELETE r
-            """
-        )
-        self._run_query(
-            f"""
-            MATCH (cs:L5ConservationState)
-            WHERE cs.domain = {self._S(domain_value)}
-            DELETE cs
-            """
-        )
-        self._run_query(f"CREATE (cs:L5ConservationState {props}) RETURN cs")
         old_status_value = cast(str | None, state["old_status"])
         caused_by_value = cast(str | None, state["caused_by_decision_id"])
-        if old_status_value is not None and old_status_value != state["status"] and caused_by_value:
-            try:
-                rows = self._run_query(
-                    f"""
-                    MATCH (cs:L5ConservationState {{id: {self._S(state_id)}}})
-                    MATCH (d:Decision {{decision_id: {self._S(caused_by_value)}}})
-                    WHERE d.domain = {self._S(domain_value)}
-                    CREATE (cs)-[:TRIGGERED_BY {{
-                        old_status: {self._S(old_status_value)},
-                        new_status: {self._S(state['status'])},
-                        timestamp: {self._S(updated_at)}
-                    }}]->(d)
-                    RETURN cs, d
-                    """
-                )
-                if not rows:
-                    log.warning(
-                        "L5ConservationState TRIGGERED_BY decision not found for domain=%s decision_id=%s",
-                        domain_value,
-                        caused_by_value,
-                    )
-            except Exception as exc:
-                log.warning(
-                    "L5ConservationState TRIGGERED_BY edge creation failed for domain=%s decision_id=%s: %s",
-                    domain_value,
-                    caused_by_value,
-                    exc,
-                )
+        theta_min_value: object = (
+            "Infinity"
+            if math.isinf(cast(float, state["theta_min"])) and cast(float, state["theta_min"]) > 0
+            else state["theta_min"]
+        )
+        self._l5_upsert_current(
+            label="L5ConservationState",
+            identity={"domain": domain_value},
+            properties={
+                "id": state_id,
+                "status": state["status"],
+                "alpha": state["alpha"],
+                "q": state["q"],
+                "V": state["V"],
+                "theta_min": theta_min_value,
+                "product": state["product"],
+                "categories_total": state["categories_total"],
+                "categories_with_data": state["categories_with_data"],
+                "baseline_product": state["baseline_product"],
+                "relative_threshold": state["relative_threshold"],
+                "complacency_flag": state["complacency_flag"],
+                "caused_by_decision_id": caused_by_value,
+                "old_status": old_status_value,
+                "updated_at": updated_at,
+            },
+            edge_type="TRIGGERED_BY",
+            edge_target_id=(
+                {"domain": domain_value, "decision_id": caused_by_value}
+                if caused_by_value
+                else None
+            ),
+            edge_condition=old_status_value is not None and old_status_value != state["status"],
+        )
         return state_id
 
     def get_conservation_state(self, domain: str) -> Dict[str, object] | None:
@@ -1730,7 +1928,9 @@ class AGEGraphStore:
             alpha=self._require_field(row, "alpha"),
             q=self._require_field(row, "q"),
             V=self._require_field(row, "V"),
-            theta_min=self._require_field(row, "theta_min"),
+            theta_min=self._decode_conservation_float(
+                self._require_field(row, "theta_min"), "theta_min"
+            ),
             product=self._require_field(row, "product"),
             categories_total=self._require_field(row, "categories_total"),
             categories_with_data=self._require_field(row, "categories_with_data"),

@@ -1,6 +1,7 @@
 import os
 import re
 import inspect
+import math
 
 import pytest
 
@@ -86,6 +87,18 @@ def _conservation_payload(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def _welford_state(n_all=4):
+    return {
+        "confirmed_mean": [0.1, 0.2],
+        "confirmed_m2": [1.0, 1.1],
+        "overridden_mean": [0.3, 0.4],
+        "overridden_m2": [2.0, 2.1],
+        "all_mean": [0.5, 0.6],
+        "all_m2": [3.0, 3.1],
+        "n_all": n_all,
+    }
 
 
 def _conservation_row(**overrides):
@@ -293,6 +306,98 @@ def test_write_decision_uses_no_param_placeholders(fake_age_client):
     assert "MERGE" not in query
 
 
+def test_write_decision_sets_pending_status_and_domain(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    store.write_decision(
+        "trading",
+        category="trend_following",
+        action="strong_execution",
+        confidence=0.86,
+        factors={"momentum": 0.7},
+        metadata={"source": "unit"},
+    )
+
+    query, parameters = FakeAGEClient.instances[0].queries[0]
+    assert parameters is None
+    assert "CREATE (d:Decision" in query
+    assert "domain: 'trading'" in query
+    assert "status: 'pending'" in query
+    assert "category: 'trend_following'" in query
+    assert "recommended_action: 'strong_execution'" in query
+    assert "factors:" in query
+    assert "metadata:" in query
+    assert "MERGE" not in query
+
+
+def test_decision_domain_not_null_for_runtime_write(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    store.write_decision(
+        "dataops",
+        category="pipeline_failure",
+        action="investigate",
+        confidence=0.82,
+        factors={"impact_scope": 0.95},
+    )
+
+    query = FakeAGEClient.instances[0].queries[0][0]
+    assert "domain: 'dataops'" in query
+    assert "domain: null" not in query
+
+
+def test_write_decision_then_outcome_lifecycle_matches_pending_guard(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    decision_id = store.write_decision(
+        "purchasing",
+        category="protein",
+        action="order_as_planned",
+        confidence=0.74,
+        factors={"supplier_score": 0.8},
+    )
+    FakeAGEClient.instances[0].responses.append([{"status": "confirmed", "o": {}}])
+
+    store.write_outcome(decision_id, "order_as_planned", True)
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    assert "status: 'pending'" in queries[0]
+    assert "AND d.status = 'pending'" in queries[1]
+    assert "SET d.status = 'confirmed'" in queries[1]
+    assert "CREATE (o:Outcome" in queries[1]
+
+
+def test_write_outcome_still_rejects_non_pending_or_missing_status(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.extend(
+        [
+            [],
+            [{"status": None}],
+            [{"cnt": 0}],
+            [{"cnt": 0}],
+        ]
+    )
+
+    with pytest.raises(ValueError, match="decision status is not pending"):
+        store.write_outcome("DEC-null-status", "hold_for_review", True)
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    assert "AND d.status = 'pending'" in queries[0]
+
+
+def test_no_existing_decision_backfill_or_migration(fake_age_client):
+    import ci_platform.graph.age_graph_store as age_graph_store
+
+    source = inspect.getsource(age_graph_store.AGEGraphStore)
+
+    assert "WHERE d.status IS NULL" not in source
+    assert "WHERE d.status = null" not in source
+    assert "SET d.status = 'pending'" not in source
+    assert 'SET d.status = "pending"' not in source
+    assert "backfill" not in source.lower()
+    assert "migration" not in source.lower()
+
+
 def test_age_graph_store_uses_client_s_directly(fake_age_client):
     store = _new_store(fake_age_client)
 
@@ -427,6 +532,192 @@ def test_count_categories_with_n_no_rows_returns_zero(fake_age_client):
     assert store.count_categories_with_n("soc", n=2) == 0
 
 
+@pytest.mark.parametrize("label", ["L5Centroid", "L5ConservationState", "L5DKWeight"])
+def test_l5_upsert_create_fresh(fake_age_client, label):
+    store = _new_store(fake_age_client)
+
+    store._l5_upsert_current(label, {"domain": "soc"}, {"status": "GREEN"})
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    joined = "\n".join(queries)
+    assert len(queries) == 2
+    assert f"MATCH (n:{label})" in queries[0]
+    assert f"CREATE (n:{label}" in queries[1]
+    assert "domain: 'soc'" in queries[1]
+    assert "status: 'GREEN'" in queries[1]
+    assert "MERGE" not in joined
+    assert "DETACH DELETE" not in joined
+
+
+@pytest.mark.parametrize("label", ["L5Centroid", "L5ConservationState", "L5DKWeight"])
+def test_l5_upsert_set_existing(fake_age_client, label):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append([{"n": {"properties": {"domain": "soc"}}}])
+
+    store._l5_upsert_current(label, {"domain": "soc"}, {"status": "GREEN"})
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    joined = "\n".join(queries)
+    assert len(queries) == 2
+    assert "SET n.status = 'GREEN'" in queries[1]
+    assert "DELETE n" not in joined
+    assert "MERGE" not in joined
+    assert "DETACH DELETE" not in joined
+
+
+def test_l5_upsert_replace_edge(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.extend([[{"n": {}}], [], [], [{"t": {}}], []])
+
+    store._l5_upsert_current(
+        "L5Centroid",
+        {"domain": "soc", "category": "cat", "action": "act"},
+        {"vector_json": "[0.1]"},
+        edge_type="SHAPED_BY",
+        edge_target_id={"domain": "soc", "decision_id": "DEC-1"},
+    )
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    joined = "\n".join(queries)
+    assert len(queries) == 5
+    assert "SET n.vector_json = '[0.1]'" in queries[1]
+    assert "MATCH (n:L5Centroid)-[r:SHAPED_BY]->()" in queries[2]
+    assert "DELETE r" in queries[2]
+    assert "MATCH (t:Decision)" in queries[3]
+    assert "WHERE t.domain = 'soc' AND t.decision_id = 'DEC-1'" in queries[3]
+    assert "LIMIT 1" in queries[3]
+    assert "CREATE (n)-[:SHAPED_BY" in queries[4]
+    assert "LIMIT 1" in queries[4]
+    assert "MERGE" not in joined
+    assert "DETACH DELETE" not in joined
+
+
+@pytest.mark.parametrize("label", ["L5Centroid", "L5ConservationState", "L5DKWeight"])
+def test_l5_upsert_cleanup_duplicates(fake_age_client, label):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append([{"n": {}}, {"n": {}}, {"n": {}}])
+
+    store._l5_upsert_current(label, {"domain": "soc"}, {"status": "GREEN"})
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    joined = "\n".join(queries)
+    assert len(queries) == 4
+    assert f"MATCH (n:{label})-[r]-()" in queries[1]
+    assert "DELETE r" in queries[1]
+    assert f"MATCH (n:{label})" in queries[2]
+    assert "DELETE n" in queries[2]
+    assert f"CREATE (n:{label}" in queries[3]
+    assert "MERGE" not in joined
+    assert "DETACH DELETE" not in joined
+
+
+def test_l5_upsert_multiple_stale_edges(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.extend([[{"n": {}}], [], [], [{"t": {}}], []])
+
+    store._l5_upsert_current(
+        "L5Centroid",
+        {"domain": "soc", "category": "cat", "action": "act"},
+        {"vector_json": "[0.1]"},
+        edge_type="SHAPED_BY",
+        edge_target_id={"domain": "soc", "decision_id": "DEC-1"},
+    )
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    assert "MATCH (n:L5Centroid)-[r:SHAPED_BY]->()" in queries[2]
+    assert "DELETE r" in queries[2]
+    assert "MATCH (n:L5Centroid)-[r]-()" not in "\n".join(queries)
+    assert "CREATE (n)-[:SHAPED_BY" in queries[4]
+
+
+def test_l5_upsert_missing_edge_target(fake_age_client, caplog):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.extend([[{"n": {}}], []])
+
+    store._l5_upsert_current(
+        "L5Centroid",
+        {"domain": "soc", "category": "cat", "action": "act"},
+        {"vector_json": "[0.1]"},
+        edge_type="SHAPED_BY",
+        edge_target_id={"domain": "soc", "decision_id": "DEC-1"},
+    )
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    assert len(queries) == 4
+    assert "SET n.vector_json = '[0.1]'" in queries[1]
+    assert "CREATE (n)-[:SHAPED_BY" not in "\n".join(queries)
+    assert "edge target not found" in caplog.text
+
+
+def test_l5_upsert_edge_condition_false(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append([{"n": {}}])
+
+    store._l5_upsert_current(
+        "L5ConservationState",
+        {"domain": "soc"},
+        {"status": "GREEN"},
+        edge_type="TRIGGERED_BY",
+        edge_target_id={"domain": "soc", "decision_id": "DEC-1"},
+        edge_condition=False,
+    )
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    joined = "\n".join(queries)
+    assert len(queries) == 2
+    assert "SET n.status = 'GREEN'" in queries[1]
+    assert "TRIGGERED_BY" not in joined
+    assert "DELETE r" not in joined
+
+
+def test_l5_upsert_no_edge_type(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append([{"n": {}}])
+
+    store._l5_upsert_current("L5DKWeight", {"domain": "soc"}, {"weight_json": "[[0.1]]"})
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    joined = "\n".join(queries)
+    assert len(queries) == 2
+    assert "SET n.weight_json = '[[0.1]]'" in queries[1]
+    assert "DELETE r" not in joined
+    assert "CREATE (n)-[:" not in joined
+
+
+def test_l5_upsert_edge_wanted_no_target_id(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append([{"n": {}}])
+
+    store._l5_upsert_current(
+        "L5Centroid",
+        {"domain": "soc", "category": "cat", "action": "act"},
+        {"vector_json": "[0.1]"},
+        edge_type="SHAPED_BY",
+        edge_target_id=None,
+        edge_condition=True,
+    )
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    joined = "\n".join(queries)
+    assert len(queries) == 3
+    assert "MATCH (n:L5Centroid)-[r:SHAPED_BY]->()" in queries[2]
+    assert "DELETE r" in queries[2]
+    assert "CREATE (n)-[:SHAPED_BY" not in joined
+
+
+def test_l5_upsert_garbled_with_incoming_edges(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append([{"n": {}}, {"n": {}}])
+
+    store._l5_upsert_current("L5ConservationState", {"domain": "soc"}, {"status": "GREEN"})
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    assert "MATCH (n:L5ConservationState)-[r]-()" in queries[1]
+    assert "DELETE r" in queries[1]
+    assert "DELETE n" in queries[2]
+    assert "CREATE (n:L5ConservationState" in queries[3]
+
+
 def test_update_dk_weights_first_write_creates_current_without_merge(fake_age_client):
     store = _new_store(fake_age_client)
 
@@ -434,27 +725,26 @@ def test_update_dk_weights_first_write_creates_current_without_merge(fake_age_cl
 
     client = FakeAGEClient.instances[0]
     queries = [query for query, _ in client.queries]
-    tx_queries = client.transactions[0].cypher
-    joined = "\n".join(queries + tx_queries)
-    assert len(client.transactions) == 1
-    assert "MATCH (w:L5DKWeight)" in queries[0]
-    assert "WHERE w.domain = 'soc'" in queries[0]
-    assert len(tx_queries) == 2
-    assert "DELETE w" in tx_queries[0]
-    assert "CREATE (w:L5DKWeight" in tx_queries[1]
+    joined = "\n".join(queries)
+    assert client.transactions == []
+    assert "MATCH (n:L5DKWeight)" in queries[0]
+    assert "WHERE n.domain = 'soc'" in queries[0]
+    assert len(queries) == 2
+    assert "DELETE n" not in joined
+    assert "CREATE (n:L5DKWeight" in queries[1]
     assert "L5DKWeightArchive" not in joined
     assert "SUPERSEDES" not in joined
-    assert "weight_json: '[[0.1,0.2],[0.3,0.4]]'" in tx_queries[1]
-    assert "n_decisions_used: 7" in tx_queries[1]
-    assert "computed_at: 123.5" in tx_queries[1]
-    assert "supersedes_id: null" in tx_queries[1]
+    assert "weight_json: '[[0.1,0.2],[0.3,0.4]]'" in queries[1]
+    assert "n_decisions_used: 7" in queries[1]
+    assert "computed_at: 123.5" in queries[1]
+    assert "supersedes_id: null" in queries[1]
     assert "$" not in joined
     assert "MERGE" not in joined
-    assert "confirmed_mean" not in joined
+    assert "DETACH DELETE" not in joined
     assert "m2_confirmed" not in joined
 
 
-def test_update_dk_weights_second_write_archives_and_supersedes(fake_age_client):
+def test_update_dk_weights_second_write_sets_current_without_archive(fake_age_client):
     store = _new_store(fake_age_client)
     FakeAGEClient.instances[0].responses.append(
         [
@@ -475,29 +765,93 @@ def test_update_dk_weights_second_write_archives_and_supersedes(fake_age_client)
 
     store.update_dk_weights("soc", [[0.1, 0.2]], 8, 124.5)
 
-    tx_queries = FakeAGEClient.instances[0].transactions[0].cypher
-    joined = "\n".join(tx_queries)
-    assert len(tx_queries) == 5
-    assert "CREATE (a:L5DKWeightArchive" in tx_queries[0]
-    assert "archive_id:" in tx_queries[0]
-    assert "dk_weight_id: 'soc:dkw:old'" in tx_queries[0]
-    assert "weight_json: '[[0.9,0.8]]'" in tx_queries[0]
-    assert "MATCH (w:L5DKWeight)-[r:SUPERSEDES]->()" in tx_queries[1]
-    assert "WHERE w.domain = 'soc'" in tx_queries[1]
-    assert "DELETE r" in tx_queries[1]
-    assert "DELETE w" in tx_queries[2]
-    assert "CREATE (w:L5DKWeight" in tx_queries[3]
-    assert "supersedes_id: 'soc:dkw_archive:" in tx_queries[3]
-    assert "CREATE (w)-[:SUPERSEDES]->(a)" in tx_queries[4]
-    assert tx_queries[0].index("L5DKWeightArchive") < joined.index("DELETE r")
-    assert joined.index("DELETE r") < joined.index("DELETE w")
-    assert joined.index("DELETE w") < joined.index("CREATE (w:L5DKWeight")
-    assert joined.index("CREATE (w:L5DKWeight") < joined.index("CREATE (w)-[:SUPERSEDES]->(a)")
-    assert "DKWeightArchive" not in joined.replace("L5DKWeightArchive", "")
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    joined = "\n".join(queries)
+    assert len(queries) == 2
+    assert "SET n.dk_weight_id =" in queries[1]
+    assert "n.weight_json = '[[0.1,0.2]]'" in queries[1]
+    assert "n.supersedes_id = null" in queries[1]
+    assert "DELETE n" not in joined
+    assert "L5DKWeightArchive" not in joined
+    assert "SUPERSEDES" not in joined
     assert "MERGE" not in joined
+    assert "DETACH DELETE" not in joined
 
 
-def test_update_dk_weights_third_write_deletes_existing_supersedes_before_current_node(fake_age_client):
+def test_update_dk_weights_with_welford_writes_json_properties(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    store.update_dk_weights(
+        "soc",
+        [[0.1, 0.2]],
+        4,
+        124.5,
+        welford_state=_welford_state(n_all=4),
+        n_confirmed=3,
+        n_overridden=1,
+        entity_group="supplier",
+    )
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    create_query = queries[-1]
+    assert "CREATE (n:L5DKWeight" in create_query
+    assert "confirmed_mean_json: '[0.1,0.2]'" in create_query
+    assert "confirmed_m2_json: '[1.0,1.1]'" in create_query
+    assert "overridden_mean_json: '[0.3,0.4]'" in create_query
+    assert "overridden_m2_json: '[2.0,2.1]'" in create_query
+    assert "all_mean_json: '[0.5,0.6]'" in create_query
+    assert "all_m2_json: '[3.0,3.1]'" in create_query
+    assert "n_confirmed: 3" in create_query
+    assert "n_overridden: 1" in create_query
+    assert "entity_group: 'supplier'" in create_query
+    assert "MERGE" not in "\n".join(queries)
+    assert "DETACH DELETE" not in "\n".join(queries)
+
+
+def test_update_dk_weights_current_state_set_preserves_welford_properties(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append(
+        [
+            {
+                "w": {
+                    "properties": {
+                        "dk_weight_id": "soc:dkw:old",
+                        "domain": "soc",
+                        "weight_json": "[[0.9,0.8]]",
+                        "n_decisions_used": 4,
+                        "computed_at": 11.0,
+                        "created_at": 22.0,
+                        "confirmed_mean_json": "[0.1,0.2]",
+                        "confirmed_m2_json": "[1.0,1.1]",
+                        "overridden_mean_json": "[0.3,0.4]",
+                        "overridden_m2_json": "[2.0,2.1]",
+                        "all_mean_json": "[0.5,0.6]",
+                        "all_m2_json": "[3.0,3.1]",
+                        "n_confirmed": 3,
+                        "n_overridden": 1,
+                        "entity_group": "supplier",
+                    }
+                }
+            }
+        ]
+    )
+
+    store.update_dk_weights("soc", [[0.1, 0.2]], 5, 124.5)
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    set_query = queries[1]
+    joined = "\n".join(queries)
+    assert "SET n.dk_weight_id =" in set_query
+    assert "n.confirmed_mean_json = null" in set_query
+    assert "n.all_m2_json = null" in set_query
+    assert "n.n_confirmed = null" in set_query
+    assert "n.n_overridden = null" in set_query
+    assert "n.entity_group = null" in set_query
+    assert "L5DKWeightArchive" not in joined
+    assert "SUPERSEDES" not in joined
+
+
+def test_update_dk_weights_ignores_existing_supersedes_current_state(fake_age_client):
     store = _new_store(fake_age_client)
     FakeAGEClient.instances[0].responses.append(
         [
@@ -519,34 +873,26 @@ def test_update_dk_weights_third_write_deletes_existing_supersedes_before_curren
 
     store.update_dk_weights("soc", [[0.1, 0.2]], 9, 125.5)
 
-    tx_queries = FakeAGEClient.instances[0].transactions[0].cypher
-    joined = "\n".join(tx_queries)
-    assert len(tx_queries) == 5
-    assert "CREATE (a:L5DKWeightArchive" in tx_queries[0]
-    assert "dk_weight_id: 'soc:dkw:second'" in tx_queries[0]
-    assert "MATCH (w:L5DKWeight)-[r:SUPERSEDES]->()" in tx_queries[1]
-    assert "WHERE w.domain = 'soc'" in tx_queries[1]
-    assert "DELETE r" in tx_queries[1]
-    assert "DELETE w" in tx_queries[2]
-    assert "CREATE (w:L5DKWeight" in tx_queries[3]
-    assert "CREATE (w)-[:SUPERSEDES]->(a)" in tx_queries[4]
-    assert joined.index("CREATE (a:L5DKWeightArchive") < joined.index("DELETE r")
-    assert joined.index("DELETE r") < joined.index("DELETE w")
-    assert joined.index("DELETE w") < joined.index("CREATE (w:L5DKWeight")
-    assert joined.index("CREATE (w:L5DKWeight") < joined.index("CREATE (w)-[:SUPERSEDES]->(a)")
-    assert "MATCH ()-[r:SUPERSEDES]->()" not in joined
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    joined = "\n".join(queries)
+    assert len(queries) == 2
+    assert "SET n.dk_weight_id =" in queries[1]
+    assert "n.supersedes_id = null" in queries[1]
+    assert "L5DKWeightArchive" not in joined
+    assert "SUPERSEDES" not in joined
+    assert "DELETE n" not in joined
     assert "MERGE" not in joined
 
 
-def test_update_dk_weights_transaction_failure_propagates(monkeypatch):
-    class FailingClient(FakeAGEClient):
-        async def run_transaction(self, fn):
+def test_update_dk_weights_write_failure_propagates(fake_age_client, monkeypatch):
+    store = _new_store(fake_age_client)
+
+    def fake_run_query(query):
+        if "CREATE (n:L5DKWeight" in query:
             raise RuntimeError("write failed")
+        return []
 
-    monkeypatch.setattr("ci_platform.graph.age_graph_store.AGEClient", FailingClient)
-    from ci_platform.graph.age_graph_store import AGEGraphStore
-
-    store = AGEGraphStore(dsn="postgresql://example/test", graph_name="test_graph")
+    monkeypatch.setattr(store, "_run_query", fake_run_query)
     with pytest.raises(RuntimeError, match="write failed"):
         store.update_dk_weights("soc", [[0.1]], 1, 1.0)
 
@@ -575,6 +921,10 @@ def test_get_dk_weights_reads_current_and_decodes_tensor(fake_age_client):
         "computed_at": 123.5,
         "created_at": 456.0,
         "supersedes_id": "soc:dkw_archive:old",
+        "welford_state": None,
+        "n_confirmed": None,
+        "n_overridden": None,
+        "entity_group": None,
     }
     query = FakeAGEClient.instances[0].queries[0][0]
     assert "MATCH (w:L5DKWeight)" in query
@@ -583,6 +933,28 @@ def test_get_dk_weights_reads_current_and_decodes_tensor(fake_age_client):
     assert "ORDER BY created_at DESC, dk_weight_id DESC" in query
     assert "LIMIT 1" in query
     assert "MERGE" not in query
+
+
+def test_get_dk_weights_reads_decoded_list_tensor(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append(
+        [
+            {
+                "domain": "soc",
+                "weight_json": [[0.1, 0.2], [0.3, 0.4]],
+                "n_decisions_used": 7,
+                "computed_at": 123.5,
+                "created_at": 456.0,
+                "supersedes_id": None,
+            }
+        ]
+    )
+
+    row = store.get_dk_weights("soc")
+
+    assert row is not None
+    assert row["weight_json"] == [[0.1, 0.2], [0.3, 0.4]]
+    assert row["welford_state"] is None
 
 
 def test_age_dk_weight_duplicate_returns_latest(fake_age_client):
@@ -649,6 +1021,133 @@ def test_get_dk_weights_revalidates_corrupt_stored_tensor(fake_age_client):
         store.get_dk_weights("soc")
 
 
+def test_get_dk_weights_rejects_malformed_decoded_list_tensor(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append(
+        [
+            {
+                "domain": "soc",
+                "weight_json": [0.1, 0.2],
+                "n_decisions_used": 7,
+                "computed_at": 123.5,
+                "created_at": 456.0,
+                "supersedes_id": None,
+            }
+        ]
+    )
+
+    with pytest.raises((TypeError, ValueError)):
+        store.get_dk_weights("soc")
+
+
+def test_get_dk_weights_decodes_welford_state(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append(
+        [
+            {
+                "domain": "soc",
+                "weight_json": "[[0.1,0.2]]",
+                "n_decisions_used": 4,
+                "computed_at": 123.5,
+                "created_at": 456.0,
+                "supersedes_id": None,
+                "confirmed_mean_json": "[0.1,0.2]",
+                "confirmed_m2_json": "[1.0,1.1]",
+                "overridden_mean_json": "[0.3,0.4]",
+                "overridden_m2_json": "[2.0,2.1]",
+                "all_mean_json": "[0.5,0.6]",
+                "all_m2_json": "[3.0,3.1]",
+                "n_confirmed": 3,
+                "n_overridden": 1,
+                "entity_group": "supplier",
+            }
+        ]
+    )
+
+    row = store.get_dk_weights("soc")
+
+    assert row is not None
+    assert row["welford_state"] == _welford_state(n_all=4)
+    assert row["n_confirmed"] == 3
+    assert row["n_overridden"] == 1
+    assert row["entity_group"] == "supplier"
+
+
+def test_get_dk_weights_decodes_list_welford_state(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append(
+        [
+            {
+                "domain": "soc",
+                "weight_json": [[0.1, 0.2]],
+                "n_decisions_used": 4,
+                "computed_at": 123.5,
+                "created_at": 456.0,
+                "supersedes_id": None,
+                "confirmed_mean_json": [0.1, 0.2],
+                "confirmed_m2_json": [1.0, 1.1],
+                "overridden_mean_json": [0.3, 0.4],
+                "overridden_m2_json": [2.0, 2.1],
+                "all_mean_json": [0.5, 0.6],
+                "all_m2_json": [3.0, 3.1],
+                "n_confirmed": 3,
+                "n_overridden": 1,
+                "entity_group": None,
+            }
+        ]
+    )
+
+    row = store.get_dk_weights("soc")
+
+    assert row is not None
+    assert row["weight_json"] == [[0.1, 0.2]]
+    assert row["welford_state"] == _welford_state(n_all=4)
+
+
+def test_get_dk_weights_old_node_without_welford_returns_none(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append(
+        [
+            {
+                "domain": "soc",
+                "weight_json": "[[0.1]]",
+                "n_decisions_used": 1,
+                "computed_at": 123.5,
+                "created_at": 456.0,
+                "supersedes_id": None,
+            }
+        ]
+    )
+
+    row = store.get_dk_weights("soc")
+
+    assert row is not None
+    assert row["welford_state"] is None
+    assert row["n_confirmed"] is None
+    assert row["n_overridden"] is None
+    assert row["entity_group"] is None
+
+
+def test_get_dk_weights_rejects_partial_welford_properties(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append(
+        [
+            {
+                "domain": "soc",
+                "weight_json": "[[0.1]]",
+                "n_decisions_used": 1,
+                "computed_at": 123.5,
+                "created_at": 456.0,
+                "supersedes_id": None,
+                "confirmed_mean_json": "[0.1]",
+            }
+        ]
+    )
+
+    with pytest.raises((TypeError, ValueError)):
+        store.get_dk_weights("soc")
+
+
 @pytest.mark.parametrize(
     "bad_tensor",
     [
@@ -690,23 +1189,59 @@ def test_update_conservation_state_creates_l5_state_without_merge_or_initial_edg
     queries = [query for query, _ in FakeAGEClient.instances[0].queries]
     joined = "\n".join(queries)
     assert state_id.startswith("soc:conservation:")
-    assert len(queries) == 3
-    assert "MATCH (cs:L5ConservationState)-[r:TRIGGERED_BY]->()" in queries[0]
-    assert "DELETE r" in queries[0]
-    assert "MATCH (cs:L5ConservationState)" in queries[1]
-    assert "DELETE cs" in queries[1]
-    assert "CREATE (cs:L5ConservationState" in queries[2]
-    assert "status: 'GREEN'" in queries[2]
-    assert "alpha: 0.25" in queries[2]
-    assert "q: 0.8" in queries[2]
-    assert "V: 42" in queries[2]
-    assert "theta_min: 23.53" in queries[2]
-    assert "product: 18.824" in queries[2]
-    assert "baseline_product: 20.0" in queries[2]
-    assert "relative_threshold: 0.9412" in queries[2]
-    assert "complacency_flag: 'false'" in queries[2]
+    assert len(queries) == 2
+    assert "MATCH (n:L5ConservationState)" in queries[0]
+    assert "WHERE n.domain = 'soc'" in queries[0]
+    assert "CREATE (n:L5ConservationState" in queries[1]
+    assert "status: 'GREEN'" in queries[1]
+    assert "alpha: 0.25" in queries[1]
+    assert "q: 0.8" in queries[1]
+    assert "V: 42" in queries[1]
+    assert "theta_min: 23.53" in queries[1]
+    assert "product: 18.824" in queries[1]
+    assert "baseline_product: 20.0" in queries[1]
+    assert "relative_threshold: 0.9412" in queries[1]
+    assert "complacency_flag: 'false'" in queries[1]
+    assert "DELETE n" not in joined
+    assert "DELETE cs" not in joined
     assert "TRIGGERED_BY {" not in joined
     assert "MERGE" not in joined
+    assert "DETACH DELETE" not in joined
+
+
+def test_update_conservation_state_serializes_infinite_theta_min_as_sentinel(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    store.update_conservation_state(
+        **_conservation_payload(theta_min=float("inf"), old_status=None)
+    )
+
+    create_query = FakeAGEClient.instances[0].queries[1][0]
+    assert "CREATE (n:L5ConservationState" in create_query
+    assert "theta_min: 'Infinity'" in create_query
+    assert "theta_min: inf" not in create_query
+    assert "theta_min: 0" not in create_query
+
+
+def test_update_conservation_state_rejects_nan_theta_min(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    with pytest.raises(ValueError, match="theta_min cannot be NaN"):
+        store.update_conservation_state(**_conservation_payload(theta_min=float("nan")))
+
+
+def test_update_conservation_state_rejects_negative_infinity_theta_min(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    with pytest.raises(ValueError, match="theta_min must be greater than 0"):
+        store.update_conservation_state(**_conservation_payload(theta_min=float("-inf")))
+
+
+def test_update_conservation_state_rejects_nonfinite_product_fields(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    with pytest.raises(ValueError, match="product must be finite"):
+        store.update_conservation_state(**_conservation_payload(product=float("inf")))
 
 
 def test_update_conservation_state_same_status_creates_no_triggered_by(fake_age_client):
@@ -715,24 +1250,28 @@ def test_update_conservation_state_same_status_creates_no_triggered_by(fake_age_
     store.update_conservation_state(**_conservation_payload(status="GREEN", old_status="GREEN"))
 
     queries = [query for query, _ in FakeAGEClient.instances[0].queries]
-    assert len(queries) == 3
+    assert len(queries) == 2
+    assert "CREATE (n:L5ConservationState" in queries[1]
     assert "TRIGGERED_BY {" not in "\n".join(queries)
+    assert "DELETE r" not in "\n".join(queries)
 
 
 def test_update_conservation_state_transition_creates_triggered_by(fake_age_client):
     store = _new_store(fake_age_client)
-    FakeAGEClient.instances[0].responses = [[], [], [], [{"cs": {}, "d": {}}]]
+    FakeAGEClient.instances[0].responses = [[], [], [], [{"t": {}}], []]
 
     store.update_conservation_state(**_conservation_payload(status="RED", old_status="GREEN"))
 
     queries = [query for query, _ in FakeAGEClient.instances[0].queries]
     joined = "\n".join(queries)
-    assert len(queries) == 4
-    assert "CREATE (cs)-[:TRIGGERED_BY" in queries[3]
-    assert "old_status: 'GREEN'" in queries[3]
-    assert "new_status: 'RED'" in queries[3]
-    assert "MATCH (d:Decision {decision_id: 'DEC-1'})" in queries[3]
-    assert "WHERE d.domain = 'soc'" in queries[3]
+    assert len(queries) == 5
+    assert "MATCH (n:L5ConservationState)-[r:TRIGGERED_BY]->()" in queries[2]
+    assert "DELETE r" in queries[2]
+    assert "MATCH (t:Decision)" in queries[3]
+    assert "WHERE t.domain = 'soc' AND t.decision_id = 'DEC-1'" in queries[3]
+    assert "LIMIT 1" in queries[3]
+    assert "CREATE (n)-[:TRIGGERED_BY" in queries[4]
+    assert "LIMIT 1" in queries[4]
     assert "MERGE" not in joined
 
 
@@ -745,6 +1284,8 @@ def test_update_conservation_state_transition_without_decision_id_creates_no_edg
 
     queries = [query for query, _ in FakeAGEClient.instances[0].queries]
     assert len(queries) == 3
+    assert "MATCH (n:L5ConservationState)-[r:TRIGGERED_BY]->()" in queries[2]
+    assert "DELETE r" in queries[2]
     assert "TRIGGERED_BY {" not in "\n".join(queries)
 
 
@@ -765,7 +1306,9 @@ def test_update_conservation_state_edge_failure_is_non_fatal(fake_age_client, mo
 
     def fake_run_query(query):
         queries.append(query)
-        if "CREATE (cs)-[:TRIGGERED_BY" in query:
+        if "MATCH (t:Decision)" in query:
+            return [{"t": {}}]
+        if "CREATE (n)-[:TRIGGERED_BY" in query:
             raise RuntimeError("edge failure")
         return []
 
@@ -776,15 +1319,15 @@ def test_update_conservation_state_edge_failure_is_non_fatal(fake_age_client, mo
     )
 
     assert state_id.startswith("soc:conservation:")
-    assert any("CREATE (cs:L5ConservationState" in query for query in queries)
-    assert any("CREATE (cs)-[:TRIGGERED_BY" in query for query in queries)
+    assert any("CREATE (n:L5ConservationState" in query for query in queries)
+    assert any("CREATE (n)-[:TRIGGERED_BY" in query for query in queries)
 
 
 def test_update_conservation_state_write_failure_propagates(fake_age_client, monkeypatch):
     store = _new_store(fake_age_client)
 
     def fake_run_query(query):
-        if "CREATE (cs:L5ConservationState" in query:
+        if "CREATE (n:L5ConservationState" in query:
             raise RuntimeError("write failure")
         return []
 
@@ -823,6 +1366,29 @@ def test_get_conservation_state_reads_l5_state(fake_age_client):
         "old_status": "AMBER",
         "updated_at": "2026-06-05T00:00:00Z",
     }
+
+
+def test_get_conservation_state_decodes_infinity_sentinel(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append(
+        [_conservation_row(theta_min="Infinity")]
+    )
+
+    row = store.get_conservation_state("soc")
+
+    assert row is not None
+    assert math.isinf(row["theta_min"])
+    assert row["theta_min"] > 0
+
+
+def test_get_conservation_state_rejects_nan_theta_min(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append(
+        [_conservation_row(theta_min=float("nan"))]
+    )
+
+    with pytest.raises(ValueError, match="theta_min cannot be NaN"):
+        store.get_conservation_state("soc")
 
 
 def test_age_conservation_duplicate_returns_latest(fake_age_client):
@@ -952,8 +1518,9 @@ def test_domain_scoped_reset_removes_l5_centroids_and_shaped_by_edges(fake_age_c
     assert "MERGE" not in cypher
 
 
-def test_update_centroid_deletes_and_creates_l5_centroid(fake_age_client):
+def test_update_centroid_upserts_l5_centroid_and_replaces_shaped_by(fake_age_client):
     store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.extend([[], [], [], [{"t": {}}], []])
 
     store.update_centroid(
         "soc",
@@ -966,15 +1533,16 @@ def test_update_centroid_deletes_and_creates_l5_centroid(fake_age_client):
 
     queries = [query for query, _ in FakeAGEClient.instances[0].queries]
     joined = "\n".join(queries)
-    assert len(queries) == 3
+    assert len(queries) == 5
     assert "MERGE" not in joined
+    assert "DETACH DELETE" not in joined
     assert "CentroidCheckpoint" not in joined
-    assert "MATCH (c:L5Centroid)" in queries[0]
-    assert "DELETE c" in queries[0]
-    assert "c.domain = 'soc'" in queries[0]
-    assert "c.category = 'duplicate_risk'" in queries[0]
-    assert "c.action = 'hold_for_review'" in queries[0]
-    assert "CREATE (c:L5Centroid" in queries[1]
+    assert "MATCH (n:L5Centroid)" in queries[0]
+    assert "DELETE n" not in joined
+    assert "n.domain = 'soc'" in queries[0]
+    assert "n.category = 'duplicate_risk'" in queries[0]
+    assert "n.action = 'hold_for_review'" in queries[0]
+    assert "CREATE (n:L5Centroid" in queries[1]
     assert "domain: 'soc'" in queries[1]
     assert "category: 'duplicate_risk'" in queries[1]
     assert "action: 'hold_for_review'" in queries[1]
@@ -982,8 +1550,29 @@ def test_update_centroid_deletes_and_creates_l5_centroid(fake_age_client):
     assert "delta_norm: 0.42" in queries[1]
     assert "caused_by_decision_id: 'DEC-1'" in queries[1]
     assert "updated_at_epoch:" in queries[1]
-    assert "CREATE (c)-[:SHAPED_BY]->(d)" in queries[2]
-    assert "MATCH (d:Decision {decision_id: 'DEC-1'})" in queries[2]
+    assert "MATCH (n:L5Centroid)-[r:SHAPED_BY]->()" in queries[2]
+    assert "DELETE r" in queries[2]
+    assert "MATCH (t:Decision)" in queries[3]
+    assert "WHERE t.domain = 'soc' AND t.decision_id = 'DEC-1'" in queries[3]
+    assert "LIMIT 1" in queries[3]
+    assert "CREATE (n)-[:SHAPED_BY" in queries[4]
+    assert "LIMIT 1" in queries[4]
+
+
+def test_update_centroid_repeated_write_sets_existing_node_with_edge(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.extend([[{"n": {}}], [], [], [{"t": {}}], []])
+
+    store.update_centroid("soc", "cat", "act", [0.1], 0.2, caused_by_decision_id="DEC-1")
+
+    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    joined = "\n".join(queries)
+    assert "SET n.vector_json = '[0.1]'" in queries[1]
+    assert "n.delta_norm = 0.2" in queries[1]
+    assert "MATCH (n:L5Centroid)-[r:SHAPED_BY]->()" in queries[2]
+    assert "CREATE (n)-[:SHAPED_BY" in queries[4]
+    assert "DELETE n" not in joined
+    assert "DELETE c" not in joined
 
 
 def test_update_centroid_without_decision_id_does_not_create_edge(fake_age_client):
@@ -992,9 +1581,13 @@ def test_update_centroid_without_decision_id_does_not_create_edge(fake_age_clien
     store.update_centroid("soc", "cat", "act", [0.1], 0.2)
 
     queries = [query for query, _ in FakeAGEClient.instances[0].queries]
-    assert len(queries) == 2
-    assert "SHAPED_BY" not in "\n".join(queries)
-    assert "MERGE" not in "\n".join(queries)
+    joined = "\n".join(queries)
+    assert len(queries) == 3
+    assert "CREATE (n:L5Centroid" in queries[1]
+    assert "MATCH (n:L5Centroid)-[r:SHAPED_BY]->()" in queries[2]
+    assert "DELETE r" in queries[2]
+    assert "CREATE (n)-[:SHAPED_BY" not in joined
+    assert "MERGE" not in joined
 
 
 def test_update_centroid_edge_failure_is_non_fatal(fake_age_client, monkeypatch):
@@ -1003,7 +1596,9 @@ def test_update_centroid_edge_failure_is_non_fatal(fake_age_client, monkeypatch)
 
     def fake_run_query(query):
         calls.append(query)
-        if "SHAPED_BY" in query:
+        if "MATCH (t:Decision)" in query:
+            return [{"t": {}}]
+        if "CREATE (n)-[:SHAPED_BY" in query:
             raise RuntimeError("missing decision")
         return []
 
@@ -1011,16 +1606,16 @@ def test_update_centroid_edge_failure_is_non_fatal(fake_age_client, monkeypatch)
 
     store.update_centroid("soc", "cat", "act", [0.1], 0.2, caused_by_decision_id="DEC-1")
 
-    assert len(calls) == 3
-    assert "CREATE (c:L5Centroid" in calls[1]
-    assert "SHAPED_BY" in calls[2]
+    assert len(calls) == 5
+    assert "CREATE (n:L5Centroid" in calls[1]
+    assert "CREATE (n)-[:SHAPED_BY" in calls[4]
 
 
 def test_update_centroid_write_failure_propagates(fake_age_client, monkeypatch):
     store = _new_store(fake_age_client)
 
     def fake_run_query(query):
-        if "CREATE (c:L5Centroid" in query:
+        if "CREATE (n:L5Centroid" in query:
             raise RuntimeError("write failed")
         return []
 

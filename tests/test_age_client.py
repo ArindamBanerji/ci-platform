@@ -37,6 +37,85 @@ def test_get_graph_client_returns_singleton():
     mod._client = None  # Cleanup
 
 
+def test_age_client_default_connection_mode_is_fresh(monkeypatch):
+    """Fresh per-query connections remain the default behavior."""
+    monkeypatch.delenv("AGE_USE_POOL", raising=False)
+    from ci_platform.graph.age_client import AGEClient
+
+    client = AGEClient(dsn="postgresql://localhost:5432/test", graph_name="g")
+
+    assert client.connection_mode == "fresh"
+
+
+def test_age_client_pool_flag_falls_back_to_warm_connection(monkeypatch):
+    """Opt-in pool mode uses warm fallback when psycopg_pool is unavailable."""
+    import ci_platform.graph.age_client as mod
+
+    monkeypatch.setattr(mod, "_PSYCOPG_POOL_AVAILABLE", False)
+
+    client = mod.AGEClient(
+        dsn="postgresql://localhost:5432/test",
+        graph_name="g",
+        use_pool=True,
+    )
+
+    assert client.connection_mode == "warm_fallback"
+    assert client.pool_available is False
+
+
+def test_age_client_pooled_mode_uses_psycopg_pool_when_available(monkeypatch):
+    """When psycopg_pool is installed, pooled mode uses ConnectionPool."""
+    import sys
+    import types
+    import ci_platform.graph.age_client as mod
+
+    class FakePool:
+        instances = []
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.conn = _mock_conn()
+            self.closed = False
+            configure = kwargs.get("configure")
+            if configure:
+                configure(self.conn)
+            FakePool.instances.append(self)
+
+        def connection(self):
+            return self.conn
+
+        def close(self):
+            self.closed = True
+
+    fake_module = types.ModuleType("psycopg_pool")
+    fake_module.ConnectionPool = FakePool
+    monkeypatch.setitem(sys.modules, "psycopg_pool", fake_module)
+    monkeypatch.setattr(mod, "_PSYCOPG_POOL_AVAILABLE", True)
+
+    client = mod.AGEClient(
+        dsn="postgresql://localhost:5432/test",
+        graph_name="g",
+        use_pool=True,
+        pool_min_size=1,
+        pool_max_size=2,
+    )
+
+    asyncio.run(client.run_query("MATCH (n) RETURN n"))
+    asyncio.run(client.close())
+
+    assert client.connection_mode == "pooled"
+    assert len(FakePool.instances) == 1
+    pool = FakePool.instances[0]
+    assert pool.kwargs["min_size"] == 1
+    assert pool.kwargs["max_size"] == 2
+    assert pool.kwargs["kwargs"]["autocommit"] is True
+    calls = [call[0][0] for call in pool.conn.execute.call_args_list]
+    assert calls[0] == "LOAD 'age'"
+    assert calls[1].startswith("SET search_path")
+    assert any(str(sql).startswith("SELECT * FROM cypher") for sql in calls)
+    assert pool.closed is True
+
+
 def test_extract_columns_simple():
     """Column extraction handles simple RETURN n."""
     from ci_platform.graph.age_client import AGEClient
@@ -145,10 +224,131 @@ def _mock_conn():
     cur = MagicMock()
     cur.fetchall.return_value = []
     conn = MagicMock()
+    conn.closed = False
     conn.__enter__ = MagicMock(return_value=conn)
     conn.__exit__ = MagicMock(return_value=False)
     conn.execute.return_value = cur
     return conn
+
+
+def test_run_query_fresh_mode_configures_age_each_query():
+    """Fresh mode preserves one connection/session setup per run_query call."""
+    from ci_platform.graph.age_client import AGEClient
+    from unittest.mock import patch
+
+    client = AGEClient(dsn="postgresql://localhost:5432/test", graph_name="test_graph")
+    conn1 = _mock_conn()
+    conn2 = _mock_conn()
+
+    with patch(
+        "ci_platform.graph.age_client.psycopg.connect",
+        side_effect=[conn1, conn2],
+    ) as connect:
+        asyncio.run(client.run_query("MATCH (n) RETURN n"))
+        asyncio.run(client.run_query("MATCH (n) RETURN n"))
+
+    assert connect.call_count == 2
+    assert conn1.execute.call_args_list[0][0][0] == "LOAD 'age'"
+    assert conn1.execute.call_args_list[1][0][0].startswith("SET search_path")
+    assert conn2.execute.call_args_list[0][0][0] == "LOAD 'age'"
+    assert conn2.execute.call_args_list[1][0][0].startswith("SET search_path")
+
+
+def test_run_query_warm_fallback_reuses_configured_connection(monkeypatch):
+    """Warm fallback configures AGE once and reuses the connection for queries."""
+    import ci_platform.graph.age_client as mod
+    from unittest.mock import patch
+
+    monkeypatch.setattr(mod, "_PSYCOPG_POOL_AVAILABLE", False)
+    client = mod.AGEClient(
+        dsn="postgresql://localhost:5432/test",
+        graph_name="test_graph",
+        use_pool=True,
+    )
+    conn = _mock_conn()
+
+    with patch("ci_platform.graph.age_client.psycopg.connect", return_value=conn) as connect:
+        asyncio.run(client.run_query("MATCH (n) RETURN n"))
+        asyncio.run(client.run_query("MATCH (n) RETURN n"))
+        asyncio.run(client.close())
+
+    assert connect.call_count == 1
+    calls = [call[0][0] for call in conn.execute.call_args_list]
+    assert calls[0] == "LOAD 'age'"
+    assert calls[1].startswith("SET search_path")
+    assert len([sql for sql in calls if sql == "LOAD 'age'"]) == 1
+    assert len([sql for sql in calls if str(sql).startswith("SELECT * FROM cypher")]) == 2
+    conn.close.assert_called_once()
+
+
+def test_run_query_same_result_shape_in_fresh_and_warm_fallback(monkeypatch):
+    """Connection mode does not change run_query's list-of-dicts result shape."""
+    import ci_platform.graph.age_client as mod
+    from unittest.mock import MagicMock, patch
+
+    monkeypatch.setattr(mod, "_PSYCOPG_POOL_AVAILABLE", False)
+
+    def make_conn():
+        cur = MagicMock()
+        cur.fetchall.return_value = [(7,)]
+        conn = _mock_conn()
+        conn.execute.return_value = cur
+        return conn
+
+    fresh = mod.AGEClient(dsn="postgresql://localhost:5432/test", graph_name="test_graph")
+    warm = mod.AGEClient(
+        dsn="postgresql://localhost:5432/test",
+        graph_name="test_graph",
+        use_pool=True,
+    )
+
+    with patch("ci_platform.graph.age_client.psycopg.connect", return_value=make_conn()):
+        fresh_result = asyncio.run(fresh.run_query("MATCH (n) RETURN count(n) AS cnt"))
+    with patch("ci_platform.graph.age_client.psycopg.connect", return_value=make_conn()):
+        warm_result = asyncio.run(warm.run_query("MATCH (n) RETURN count(n) AS cnt"))
+
+    assert fresh_result == [{"cnt": 7}]
+    assert warm_result == [{"cnt": 7}]
+
+
+def test_transaction_commit_and_rollback_still_use_fresh_connection():
+    """Package 1 preserves existing transaction commit/rollback semantics."""
+    from ci_platform.graph.age_client import AGEClient
+    from unittest.mock import patch
+
+    client = AGEClient(dsn="postgresql://localhost:5432/test", graph_name="test_graph", use_pool=True)
+    conn = _mock_conn()
+
+    with patch("ci_platform.graph.age_client.psycopg.connect", return_value=conn):
+        result = asyncio.run(client.run_transaction(lambda tx: "ok"))
+
+    assert result == "ok"
+    conn.commit.assert_called_once()
+    conn.rollback.assert_not_called()
+
+    conn = _mock_conn()
+
+    def fail(_tx):
+        raise RuntimeError("boom")
+
+    with patch("ci_platform.graph.age_client.psycopg.connect", return_value=conn):
+        with pytest.raises(RuntimeError, match="boom"):
+            asyncio.run(client.run_transaction(fail))
+
+    conn.rollback.assert_called_once()
+
+
+def test_redact_dsn_hides_password_values():
+    """Diagnostic DSN strings must not leak passwords."""
+    from ci_platform.graph.age_client import redact_dsn
+
+    keyword = "host=localhost port=5433 dbname=x user=u password=secret"
+    url = "postgresql://user:secret@localhost:5433/db"
+
+    assert "secret" not in redact_dsn(keyword)
+    assert "password=***" in redact_dsn(keyword)
+    assert "secret" not in redact_dsn(url)
+    assert ":***@" in redact_dsn(url)
 
 
 def test_param_no_collision_source_source_type():

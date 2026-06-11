@@ -13,8 +13,9 @@ Key AGE dialect differences from Neo4j:
   - MATCH-then-CREATE pattern required (MERGE unsupported; two-step for idempotency)
 
 Connection model:
-  - Sync psycopg.connect() per query, executed in asyncio.to_thread()
-  - No persistent connection — no event-loop coupling
+  - Default: sync psycopg.connect() per query, executed in asyncio.to_thread()
+  - Opt-in: pooled AGE connections when psycopg_pool is available
+  - Opt-in fallback: serialized warm connection reuse when psycopg_pool is absent
   - All public methods are async (interface parity with Neo4jClient)
 
 Environment variables:
@@ -26,11 +27,13 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
 import random
 import re
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -45,10 +48,33 @@ DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://localhost:5432/soc_copilot",
 )
+_PSYCOPG_POOL_AVAILABLE = importlib.util.find_spec("psycopg_pool") is not None
 
 _DESTRUCTIVE_SET_RE = re.compile(r'\bSET\s+(\w+)\s*=\s*\{')
 _MERGE_RE = re.compile(r'\bMERGE\s*\(', re.IGNORECASE)
 T = TypeVar("T")
+
+
+def _env_truthy(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid integer for %s", name)
+        return default
+
+
+def redact_dsn(dsn: str) -> str:
+    """Redact credentials from DSNs before diagnostic logging/reporting."""
+    redacted = re.sub(r"(?i)(password=)[^\s]+", r"\1***", str(dsn))
+    redacted = re.sub(r"(postgres(?:ql)?://[^:/@]+:)[^@]+(@)", r"\1***\2", redacted)
+    return redacted
 
 
 def _check_safe_cypher(cypher: str) -> None:
@@ -88,40 +114,122 @@ class AGEClient:
         self,
         dsn: Optional[str] = None,
         graph_name: Optional[str] = None,
+        use_pool: Optional[bool] = None,
+        pool_min_size: Optional[int] = None,
+        pool_max_size: Optional[int] = None,
     ) -> None:
         self._dsn = dsn or DATABASE_URL
         self._graph = graph_name or GRAPH_NAME
         if not self._dsn:
             raise ValueError("DATABASE_URL is required for AGEClient")
+        self._pool_requested = _env_truthy("AGE_USE_POOL") if use_pool is None else bool(use_pool)
+        self._pool_min_size = pool_min_size if pool_min_size is not None else _env_int("AGE_POOL_MIN_SIZE", 1)
+        self._pool_max_size = pool_max_size if pool_max_size is not None else _env_int("AGE_POOL_MAX_SIZE", 5)
+        self._pool_available = _PSYCOPG_POOL_AVAILABLE
+        self._pool = None
+        self._warm_conn = None
+        self._warm_lock = threading.RLock()
+        self._closed = False
+        if not self._pool_requested:
+            self._connection_mode = "fresh"
+        elif self._pool_available:
+            self._connection_mode = "pooled"
+        else:
+            self._connection_mode = "warm_fallback"
 
     # ── interface parity (Neo4jClient) ────────────────────────────────────────
 
     async def connect(self) -> None:
         """
-        No-op. AGEClient uses per-query connections.
-        Exists for interface parity with Neo4jClient so callers
-        need no hasattr() guards.
+        Initialize opt-in pooled/warm connection resources.
+        Fresh mode remains a no-op for Neo4jClient interface parity.
         """
-        pass
+        await asyncio.to_thread(self._sync_connect)
 
     async def close(self) -> None:
         """
-        No-op. AGEClient uses per-query connections.
-        Exists for interface parity with Neo4jClient so callers
-        need no hasattr() guards.
+        Close opt-in pooled/warm connection resources.
+        Fresh mode remains a no-op for Neo4jClient interface parity.
         """
-        pass
+        await asyncio.to_thread(self._sync_close)
+
+    @property
+    def connection_mode(self) -> str:
+        """Connection behavior used by run_query: fresh, pooled, or warm_fallback."""
+        return getattr(self, "_connection_mode", "fresh")
+
+    @property
+    def pool_available(self) -> bool:
+        return bool(getattr(self, "_pool_available", False))
+
+    def redacted_dsn(self) -> str:
+        return redact_dsn(getattr(self, "_dsn", ""))
+
+    def _configure_age_session(self, conn: psycopg.Connection) -> None:
+        conn.execute("LOAD 'age'")
+        conn.execute("SET search_path = ag_catalog, '$user', public")
+
+    def _connect_fresh(self, *, autocommit: bool) -> psycopg.Connection:
+        conn = psycopg.connect(self._dsn, autocommit=autocommit, connect_timeout=5)
+        self._configure_age_session(conn)
+        return conn
+
+    def _ensure_pool(self):
+        if getattr(self, "_pool", None) is None:
+            from psycopg_pool import ConnectionPool  # type: ignore[import-not-found]
+
+            self._pool = ConnectionPool(
+                conninfo=self._dsn,
+                min_size=getattr(self, "_pool_min_size", 1),
+                max_size=getattr(self, "_pool_max_size", 5),
+                kwargs={"autocommit": True, "connect_timeout": 5},
+                configure=self._configure_age_session,
+                open=True,
+            )
+        return self._pool
+
+    def _ensure_warm_connection(self) -> psycopg.Connection:
+        warm_conn = getattr(self, "_warm_conn", None)
+        if warm_conn is not None and not getattr(warm_conn, "closed", False):
+            return warm_conn
+        warm_conn = self._connect_fresh(autocommit=True)
+        self._warm_conn = warm_conn
+        return warm_conn
+
+    def _discard_warm_connection(self) -> None:
+        warm_conn = getattr(self, "_warm_conn", None)
+        self._warm_conn = None
+        if warm_conn is not None:
+            try:
+                warm_conn.close()
+            except Exception:
+                logger.debug("Failed to close warm AGE connection", exc_info=True)
+
+    def _sync_connect(self) -> None:
+        mode = self.connection_mode
+        if mode == "pooled":
+            self._ensure_pool()
+        elif mode == "warm_fallback":
+            with getattr(self, "_warm_lock", threading.RLock()):
+                self._ensure_warm_connection()
+
+    def _sync_close(self) -> None:
+        pool = getattr(self, "_pool", None)
+        if pool is not None:
+            try:
+                pool.close()
+            finally:
+                self._pool = None
+        with getattr(self, "_warm_lock", threading.RLock()):
+            self._discard_warm_connection()
+        self._closed = True
 
     # ── graph setup ───────────────────────────────────────────────────────────
 
     async def ensure_graph(self) -> None:
         """Create AGE graph if it doesn't exist. Idempotent."""
         def _do():
-            with psycopg.connect(self._dsn, autocommit=True) as conn:
-                conn.execute("LOAD 'age'")
-                conn.execute(
-                    "SET search_path = ag_catalog, '$user', public"
-                )
+            with self._connect_fresh(autocommit=True) as conn:
                 try:
                     conn.execute(
                         "SELECT create_graph(%s)", (self._graph,)
@@ -300,7 +408,8 @@ class AGEClient:
         self, cypher: str, parameters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Synchronous execution.  Opens/closes connection per call.
+        Synchronous execution.  Uses fresh, pooled, or warm-fallback connection
+        behavior according to the client mode.
         Called from run_query() via asyncio.to_thread().
         """
         if not cypher.strip():
@@ -319,15 +428,25 @@ class AGEClient:
         MAX_RETRIES = 3
         for attempt in range(MAX_RETRIES):
             try:
-                with psycopg.connect(self._dsn, autocommit=True, connect_timeout=5) as conn:
-                    conn.execute("LOAD 'age'")
-                    conn.execute(
-                        "SET search_path = ag_catalog, '$user', public"
-                    )
-                    cur = conn.execute(sql)
-                    rows = cur.fetchall()
+                mode = self.connection_mode
+                if mode == "pooled":
+                    pool = self._ensure_pool()
+                    with pool.connection() as conn:
+                        cur = conn.execute(sql)
+                        rows = cur.fetchall()
+                elif mode == "warm_fallback":
+                    with getattr(self, "_warm_lock", threading.RLock()):
+                        conn = self._ensure_warm_connection()
+                        cur = conn.execute(sql)
+                        rows = cur.fetchall()
+                else:
+                    with self._connect_fresh(autocommit=True) as conn:
+                        cur = conn.execute(sql)
+                        rows = cur.fetchall()
                 break
             except Exception as e:
+                if self.connection_mode == "warm_fallback":
+                    self._discard_warm_connection()
                 if "Entity failed to be updated" in str(e) and attempt < MAX_RETRIES - 1:
                     delay = 0.1 * (attempt + 1) + random.uniform(0, 0.05)
                     time.sleep(delay)
@@ -377,9 +496,7 @@ class AGEClient:
         return results
 
     def _sync_transaction(self, operation: Callable[["AGETransaction"], T]) -> T:
-        with psycopg.connect(self._dsn, autocommit=False, connect_timeout=5) as conn:
-            conn.execute("LOAD 'age'")
-            conn.execute("SET search_path = ag_catalog, '$user', public")
+        with self._connect_fresh(autocommit=False) as conn:
             tx = AGETransaction(self, conn)
             try:
                 result = operation(tx)

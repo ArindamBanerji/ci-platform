@@ -315,12 +315,21 @@ class AGEGraphStoreAdapter:
         weight_tensor: list[list[float]],
         n_decisions_used: int,
         computed_at: float,
+        *,
+        welford_state: dict[str, object] | None = None,
+        n_confirmed: int | None = None,
+        n_overridden: int | None = None,
+        entity_group: str | None = None,
     ) -> None:
         self._store.update_dk_weights(
             domain=domain,
             weight_tensor=weight_tensor,
             n_decisions_used=n_decisions_used,
             computed_at=computed_at,
+            welford_state=welford_state,
+            n_confirmed=n_confirmed,
+            n_overridden=n_overridden,
+            entity_group=entity_group,
         )
 
     def get_dk_weights(self, domain: str) -> dict[str, object] | None:
