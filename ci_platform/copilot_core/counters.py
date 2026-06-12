@@ -13,7 +13,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Mapping, Optional, Protocol
+from typing import Any, Mapping, Optional, Protocol, cast
 
 
 # Infrastructure default only. Store mutation methods intentionally do not
@@ -270,8 +270,8 @@ class AGECounterStore:
 
         result = self._graph.run_transaction(operation)
         if inspect.isawaitable(result):
-            return await result
-        return result
+            return cast(CounterRead, await result)
+        return cast(CounterRead, result)
 
     def increment_cumulative_in_tx(
         self, tx: Any, counter: CounterDef, delta: int = 1
@@ -319,8 +319,8 @@ class AGECounterStore:
 
         result = self._graph.run_transaction(operation)
         if inspect.isawaitable(result):
-            return await result
-        return result
+            return cast(CounterRead, await result)
+        return cast(CounterRead, result)
 
     def increment_distinct_in_tx(
         self,

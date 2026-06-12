@@ -14,7 +14,11 @@ import logging
 import threading
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Awaitable, Deque
+from typing import Any, Awaitable, Coroutine, Deque, cast
+
+
+async def _await_any(awaitable: Awaitable[Any]) -> Any:
+    return await awaitable
 
 
 @dataclass(frozen=True)
@@ -75,7 +79,12 @@ class BackgroundTaskManager:
         if not inspect.isawaitable(awaitable):
             raise TypeError("submit() requires an awaitable")
 
-        task = asyncio.create_task(awaitable, name=name)
+        if inspect.iscoroutine(awaitable):
+            coroutine = cast(Coroutine[Any, Any, Any], awaitable)
+        else:
+            coroutine = _await_any(awaitable)
+
+        task: asyncio.Task[Any] = asyncio.create_task(coroutine, name=name)
         with self._lock:
             self._submitted += 1
             self._tasks.add(task)
