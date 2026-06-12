@@ -160,32 +160,41 @@ class AGEClient:
 
     @property
     def pool_available(self) -> bool:
-        return bool(getattr(self, "_pool_available", False))
+        return self.connection_mode == "pooled" and bool(getattr(self, "_pool_available", False))
 
     def redacted_dsn(self) -> str:
         return redact_dsn(getattr(self, "_dsn", ""))
 
     def _configure_age_session(self, conn: psycopg.Connection) -> None:
         conn.execute("LOAD 'age'")
-        conn.execute("SET search_path = ag_catalog, '$user', public")
+        conn.execute("SET search_path = ag_catalog, '$user', public; SET statement_timeout = '120s'")
 
     def _connect_fresh(self, *, autocommit: bool) -> psycopg.Connection:
-        conn = psycopg.connect(self._dsn, autocommit=autocommit, connect_timeout=5)
+        conn = psycopg.connect(self._dsn, autocommit=autocommit, connect_timeout=10)
         self._configure_age_session(conn)
         return conn
 
     def _ensure_pool(self):
         if getattr(self, "_pool", None) is None:
-            from psycopg_pool import ConnectionPool  # type: ignore[import-not-found]
+            try:
+                from psycopg_pool import ConnectionPool  # type: ignore[import-not-found]
 
-            self._pool = ConnectionPool(
-                conninfo=self._dsn,
-                min_size=getattr(self, "_pool_min_size", 1),
-                max_size=getattr(self, "_pool_max_size", 5),
-                kwargs={"autocommit": True, "connect_timeout": 5},
-                configure=self._configure_age_session,
-                open=True,
-            )
+                self._pool = ConnectionPool(
+                    conninfo=self._dsn,
+                    min_size=getattr(self, "_pool_min_size", 1),
+                    max_size=getattr(self, "_pool_max_size", 5),
+                    kwargs={"autocommit": True, "connect_timeout": 10},
+                    configure=self._configure_age_session,
+                    open=True,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "AGE connection pool initialization failed; falling back to warm connection reuse: %s",
+                    exc,
+                )
+                self._pool_available = False
+                self._connection_mode = "warm_fallback"
+                self._pool = None
         return self._pool
 
     def _ensure_warm_connection(self) -> psycopg.Connection:
@@ -208,7 +217,9 @@ class AGEClient:
     def _sync_connect(self) -> None:
         mode = self.connection_mode
         if mode == "pooled":
-            self._ensure_pool()
+            if self._ensure_pool() is None:
+                with getattr(self, "_warm_lock", threading.RLock()):
+                    self._ensure_warm_connection()
         elif mode == "warm_fallback":
             with getattr(self, "_warm_lock", threading.RLock()):
                 self._ensure_warm_connection()
@@ -431,9 +442,15 @@ class AGEClient:
                 mode = self.connection_mode
                 if mode == "pooled":
                     pool = self._ensure_pool()
-                    with pool.connection() as conn:
-                        cur = conn.execute(sql)
-                        rows = cur.fetchall()
+                    if pool is None:
+                        with getattr(self, "_warm_lock", threading.RLock()):
+                            conn = self._ensure_warm_connection()
+                            cur = conn.execute(sql)
+                            rows = cur.fetchall()
+                    else:
+                        with pool.connection() as conn:
+                            cur = conn.execute(sql)
+                            rows = cur.fetchall()
                 elif mode == "warm_fallback":
                     with getattr(self, "_warm_lock", threading.RLock()):
                         conn = self._ensure_warm_connection()
