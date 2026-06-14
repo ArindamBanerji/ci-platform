@@ -2434,6 +2434,43 @@ class AGEGraphStore:
             merged["outcome_metadata"] = outcome["metadata"]
         return merged
 
+    def write_entity_enrichment(
+        self,
+        *,
+        domain: str,
+        entity_type: str,
+        entity_id: str,
+        namespace: str,
+        metrics: Dict[str, Any],
+        computed_from: Any,
+        dry_run: bool = False,
+        idempotency_key: str | None = None,
+    ) -> Any:
+        raise NotImplementedError(
+            "AGEGraphStore does not support entity enrichment writes in P39A; "
+            "durable AGE enrichment is deferred"
+        )
+
+    def read_entity_enrichment(
+        self,
+        *,
+        domain: str,
+        entity_type: str,
+        entity_id: str,
+        namespace: str | None = None,
+    ) -> Dict[str, Any]:
+        return {}
+
+    def list_entity_enrichments(
+        self,
+        *,
+        domain: str,
+        entity_type: str | None = None,
+        namespace: str | None = None,
+        limit: int = 500,
+    ) -> List[Any]:
+        return []
+
     @staticmethod
     def _int_from_rows(rows: List[Dict[str, Any]], key: str) -> int:
         if not rows:

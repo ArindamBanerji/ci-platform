@@ -451,5 +451,42 @@ class AGEGraphStoreAdapter:
     def get_decision_links(self, decision_id: str | None = None) -> list[dict[str, Any]]:
         return self._store.get_decision_links(decision_id=decision_id)
 
+    def write_entity_enrichment(
+        self,
+        *,
+        domain: str,
+        entity_type: str,
+        entity_id: str,
+        namespace: str,
+        metrics: dict[str, Any],
+        computed_from: Any,
+        dry_run: bool = False,
+        idempotency_key: str | None = None,
+    ) -> Any:
+        raise NotImplementedError(
+            "AGEGraphStoreAdapter does not support entity enrichment writes in P39A; "
+            "durable AGE enrichment is deferred"
+        )
+
+    def read_entity_enrichment(
+        self,
+        *,
+        domain: str,
+        entity_type: str,
+        entity_id: str,
+        namespace: str | None = None,
+    ) -> dict[str, Any]:
+        return {}
+
+    def list_entity_enrichments(
+        self,
+        *,
+        domain: str,
+        entity_type: str | None = None,
+        namespace: str | None = None,
+        limit: int = 500,
+    ) -> list[Any]:
+        return []
+
     def close(self) -> None:
         self._store.close()
