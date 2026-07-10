@@ -451,6 +451,12 @@ class AGEGraphStoreAdapter:
     def get_decision_links(self, decision_id: str | None = None) -> list[dict[str, Any]]:
         return self._store.get_decision_links(decision_id=decision_id)
 
+    def query_context(self, entity_id: str, max_depth: int) -> list[dict[str, Any]]:
+        return self._store.query_context(entity_id=str(entity_id), hops=int(max_depth))
+
+    def query_similar(self, entity_id: str, limit: int) -> list[dict[str, Any]]:
+        return self._store.query_similar(decision_id=str(entity_id), limit=int(limit))
+
     def write_entity_enrichment(
         self,
         *,

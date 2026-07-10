@@ -36,6 +36,7 @@ import re
 import threading
 import time
 import uuid
+import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, TypeVar, cast
 
@@ -44,10 +45,29 @@ import psycopg  # sync only — no AsyncConnection anywhere
 logger = logging.getLogger(__name__)
 
 GRAPH_NAME = os.getenv("AGE_GRAPH_NAME", "soc_graph")
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://localhost:5432/soc_copilot",
-)
+
+
+def _with_sslmode_disabled(dsn: str) -> str:
+    if "sslmode" in dsn:
+        return dsn
+    sep = "&" if "?" in dsn else ("?" if "://" in dsn else " ")
+    return f"{dsn}{sep}sslmode=disable"
+
+
+def _resolve_database_url() -> str:
+    for name in ("GRAPH_DSN", "AGE_DSN", "DATABASE_URL"):
+        value = os.getenv(name, "").strip()
+        if value:
+            return _with_sslmode_disabled(value)
+    warnings.warn(
+        "No GRAPH_DSN set - using localhost fallback. "
+        "Set GRAPH_DSN with WSL2 NAT IP per Rule #40.",
+        stacklevel=2,
+    )
+    return _with_sslmode_disabled("postgresql://localhost:5432/soc_copilot")
+
+
+DATABASE_URL = _resolve_database_url()
 _PSYCOPG_POOL_AVAILABLE = importlib.util.find_spec("psycopg_pool") is not None
 
 _DESTRUCTIVE_SET_RE = re.compile(r'\bSET\s+(\w+)\s*=\s*\{')
