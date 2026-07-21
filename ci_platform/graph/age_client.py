@@ -670,32 +670,31 @@ class AGEClient:
             return 0
 
     async def count_verified_decisions(self) -> int:
-        """
-        Count all Decision nodes.
-
-        AGE migration context: Decision nodes are migrated from Aura and represent
-        historically validated decisions (bootstrap + ingest). They have no 'verified'
-        field (that was a string sentinel that never existed in Aura) and no 'outcome'
-        field (set only by live triage feedback). All migrated Decision nodes count
-        as verified by definition in this schema.
-
-        Neo4jClient uses WHERE d.outcome IS NOT NULL — bootstrap decisions also lack
-        'outcome', so that predicate also returns 0 in a fresh demo. AGEClient counts
-        ALL Decision nodes so GraphSnapshot.verified_decisions reflects graph size.
-        """
+        """Count verified SOC Decisions with the full D2 predicate."""
         try:
             results = await self.run_query(
-                "MATCH (d:Decision) RETURN count(d) AS cnt"
+                "MATCH (d:Decision) "
+                "WHERE (d.domain = 'soc' OR d.domain IS NULL) "
+                "AND (d.archived IS NULL OR d.archived <> true) "
+                "AND ("
+                "(d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden']) "
+                "OR (d.status IS NULL AND d.outcome IS NOT NULL)"
+                ") "
+                "RETURN count(DISTINCT d.decision_id) AS cnt"
             )
             return int(results[0]["cnt"]) if results else 0
         except (TypeError, ValueError, KeyError):
             return 0
 
     async def count_correct_decisions(self) -> int:
-        """Count Decision nodes where correct = true."""
+        """Count correct legacy SOC Decisions."""
         try:
             results = await self.run_query(
-                "MATCH (d:Decision) WHERE d.correct = true RETURN count(d) AS cnt"
+                "MATCH (d:Decision) "
+                "WHERE (d.domain = 'soc' OR d.domain IS NULL) "
+                "AND (d.archived IS NULL OR d.archived <> true) "
+                "AND d.correct = true "
+                "RETURN count(DISTINCT d.decision_id) AS cnt"
             )
             return int(results[0]["cnt"]) if results else 0
         except (TypeError, ValueError, KeyError):

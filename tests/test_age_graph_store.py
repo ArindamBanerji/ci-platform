@@ -2,6 +2,8 @@ import os
 import re
 import inspect
 import math
+import time
+import uuid
 
 import pytest
 
@@ -2038,14 +2040,46 @@ def test_close_swallows_exceptions(fake_age_client, monkeypatch):
 
 
 GRAPH_DSN = os.getenv("GRAPH_DSN")
+AGE_LIVE_STORE_TESTS = os.getenv("AGE_LIVE_STORE_TESTS") == "1"
 
 
-@pytest.mark.skipif(not GRAPH_DSN, reason="GRAPH_DSN missing; skipping live AGE tests")
+@pytest.mark.skipif(
+    not AGE_LIVE_STORE_TESTS,
+    reason="AGE_LIVE_STORE_TESTS=1 required; skipping live AGE store tests",
+)
 class TestAGEGraphStoreLive:
+    graph_name = None
+
+    @classmethod
+    def setup_class(cls):
+        if not GRAPH_DSN:
+            pytest.skip("GRAPH_DSN missing; cannot run opted-in live AGE store tests")
+        try:
+            import psycopg
+
+            cls.graph_name = f"age_store_test_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+            with psycopg.connect(GRAPH_DSN, autocommit=True) as conn:
+                conn.execute("LOAD 'age'")
+                conn.execute("SET search_path = ag_catalog, '$user', public")
+                conn.execute("SELECT create_graph(%s)", (cls.graph_name,))
+        except Exception as exc:
+            pytest.skip(f"AGE disposable graph unavailable: {exc}")
+
+    @classmethod
+    def teardown_class(cls):
+        if not cls.graph_name:
+            return
+        import psycopg
+
+        with psycopg.connect(GRAPH_DSN, autocommit=True) as conn:
+            conn.execute("LOAD 'age'")
+            conn.execute("SET search_path = ag_catalog, '$user', public")
+            conn.execute("SELECT drop_graph(%s, true)", (cls.graph_name,))
+
     def test_live_write_decision_returns_id(self):
         from ci_platform.graph import AGEGraphStore
 
-        store = AGEGraphStore(dsn=GRAPH_DSN, graph_name="test_graph")
+        store = AGEGraphStore(dsn=GRAPH_DSN, graph_name=self.graph_name)
         decision_id = store.write_decision(
             "soc",
             "duplicate_risk",
@@ -2060,7 +2094,7 @@ class TestAGEGraphStoreLive:
     def test_live_outcome_and_counts(self):
         from ci_platform.graph import AGEGraphStore
 
-        store = AGEGraphStore(dsn=GRAPH_DSN, graph_name="test_graph")
+        store = AGEGraphStore(dsn=GRAPH_DSN, graph_name=self.graph_name)
         decision_id = store.write_decision(
             "soc",
             "price_variance",
@@ -2077,7 +2111,7 @@ class TestAGEGraphStoreLive:
     def test_live_save_evolution_event_no_crash(self):
         from ci_platform.graph import AGEGraphStore
 
-        store = AGEGraphStore(dsn=GRAPH_DSN, graph_name="test_graph")
+        store = AGEGraphStore(dsn=GRAPH_DSN, graph_name=self.graph_name)
         store.save_evolution_event(
             "soc",
             "variant_generated",

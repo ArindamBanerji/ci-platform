@@ -1,5 +1,7 @@
 import inspect
 import os
+import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -662,14 +664,46 @@ def test_adapter_source_has_no_forbidden_imports_or_vocab():
 
 
 GRAPH_DSN = os.getenv("GRAPH_DSN")
+AGE_LIVE_STORE_TESTS = os.getenv("AGE_LIVE_STORE_TESTS") == "1"
 
 
-@pytest.mark.skipif(not GRAPH_DSN, reason="GRAPH_DSN missing; skipping live AGE tests")
+@pytest.mark.skipif(
+    not AGE_LIVE_STORE_TESTS,
+    reason="AGE_LIVE_STORE_TESTS=1 required; skipping live AGE store tests",
+)
 class TestAGEGraphStoreAdapterLive:
+    graph_name = None
+
+    @classmethod
+    def setup_class(cls):
+        if not GRAPH_DSN:
+            pytest.skip("GRAPH_DSN missing; cannot run opted-in live AGE store tests")
+        try:
+            import psycopg
+
+            cls.graph_name = f"age_store_test_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+            with psycopg.connect(GRAPH_DSN, autocommit=True) as conn:
+                conn.execute("LOAD 'age'")
+                conn.execute("SET search_path = ag_catalog, '$user', public")
+                conn.execute("SELECT create_graph(%s)", (cls.graph_name,))
+        except Exception as exc:
+            pytest.skip(f"AGE disposable graph unavailable: {exc}")
+
+    @classmethod
+    def teardown_class(cls):
+        if not cls.graph_name:
+            return
+        import psycopg
+
+        with psycopg.connect(GRAPH_DSN, autocommit=True) as conn:
+            conn.execute("LOAD 'age'")
+            conn.execute("SET search_path = ag_catalog, '$user', public")
+            conn.execute("SELECT drop_graph(%s, true)", (cls.graph_name,))
+
     def test_live_write_read_decision_and_outcome(self):
         from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
 
-        adapter = AGEGraphStoreAdapter(dsn=GRAPH_DSN, graph_name="test_graph")
+        adapter = AGEGraphStoreAdapter(dsn=GRAPH_DSN, graph_name=self.graph_name)
         decision_id = adapter.write_decision(
             "soc",
             "price_variance",
@@ -692,7 +726,7 @@ class TestAGEGraphStoreAdapterLive:
     def test_live_evolution_and_centroids_no_crash(self):
         from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
 
-        adapter = AGEGraphStoreAdapter(dsn=GRAPH_DSN, graph_name="test_graph")
+        adapter = AGEGraphStoreAdapter(dsn=GRAPH_DSN, graph_name=self.graph_name)
         adapter.save_evolution_event("soc", "variant_generated", "threshold_rule", "variant-live")
         adapter.save_centroids("soc", "price_variance", [[0.1, 0.2]], decision_id="DEC-live")
         adapter.close()

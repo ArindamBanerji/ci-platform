@@ -31,6 +31,9 @@ _DK_WELFORD_VECTOR_KEYS = (
     "all_m2",
 )
 
+VALID_DOMAINS = frozenset({"soc", "trading", "purchasing", "dataops", "s2p"})
+_SAFE_DOMAIN_RE = re.compile(r"^[a-zA-Z0-9_-]{1,200}$")
+
 
 class AGEGraphStore:
     """Synchronous GraphStore adapter backed by AGEClient."""
@@ -539,6 +542,19 @@ class AGEGraphStore:
 
     def _run_query(self, cypher: str) -> List[Dict[str, Any]]:
         return self._run(self._client.run_query(cypher, None)) or []
+
+    @staticmethod
+    def _validated_domain(domain: str) -> str:
+        if not isinstance(domain, str) or not _SAFE_DOMAIN_RE.fullmatch(domain):
+            value = str(domain)
+            raise ValueError(f"unsupported graph domain: {value}")
+        return domain
+
+    def _domain_clause(self, domain: str) -> str:
+        value = self._validated_domain(domain)
+        literal = self._S(value)
+        # Legacy SOC Decisions may have no domain property.
+        return f"(d.domain = {literal} OR d.domain IS NULL)" if value == "soc" else f"d.domain = {literal}"
 
     def write_decision(
         self,
@@ -1536,43 +1552,72 @@ class AGEGraphStore:
         return [self._node_to_dict(row.get("d", row)) for row in rows]
 
     def get_verified_decisions(self, domain: str) -> List[Dict[str, Any]]:
+        domain_clause = self._domain_clause(domain)
         rows = self._run_query(
             f"""
-            MATCH (d:Decision)-[:HAS_OUTCOME]->(o:Outcome)
-            WHERE d.domain = {self._S(domain)}
-            RETURN d, o
+            MATCH (d:Decision)
+            WHERE {domain_clause}
+              AND (d.archived IS NULL OR d.archived <> true)
+              AND (
+                  (d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden'])
+                  OR
+                  (d.status IS NULL AND d.outcome IS NOT NULL)
+              )
+            OPTIONAL MATCH (d)-[:HAS_OUTCOME]->(o:Outcome)
+            RETURN DISTINCT properties(d) AS d, properties(o) AS o
             """
         )
         return [self._merge_decision_outcome(row) for row in rows]
 
     def count_verified(self, domain: str) -> int:
-        rows = self._run_query(
-            f"""
-            MATCH (d:Decision)-[:HAS_OUTCOME]->(o:Outcome)
-            WHERE d.domain = {self._S(domain)}
-            RETURN count(o) AS cnt
-            """
-        )
-        return self._int_from_rows(rows, "cnt")
-
-    def count_verified_decisions(self, domain: str) -> int:
+        domain_clause = self._domain_clause(domain)
         rows = self._run_query(
             f"""
             MATCH (d:Decision)
-            WHERE d.domain = {self._S(domain)}
-              AND (d.status = 'confirmed' OR d.status = 'overridden')
-              AND (d.archived IS NULL OR d.archived = false)
-            RETURN count(d) AS cnt
+            WHERE {domain_clause}
+              AND (d.archived IS NULL OR d.archived <> true)
+              AND (
+                  (d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden'])
+                  OR
+                  (d.status IS NULL AND d.outcome IS NOT NULL)
+              )
+            RETURN count(DISTINCT d.decision_id) AS v
             """
         )
-        return self._int_from_rows(rows, "cnt")
+        return self._int_from_rows(rows, "v" if rows and "v" in rows[0] else "cnt")
 
-    def count_correct(self, domain: str) -> int:
+    def count_verified_decisions(self, domain: str) -> int:
+        domain_clause = self._domain_clause(domain)
         rows = self._run_query(
             f"""
-            MATCH (d:Decision)-[:HAS_OUTCOME]->(o:Outcome)
-            WHERE d.domain = {self._S(domain)} AND o.is_correct = true
-            RETURN count(o) AS cnt
+            MATCH (d:Decision)
+            WHERE {domain_clause}
+              AND (d.archived IS NULL OR d.archived <> true)
+              AND (
+                  (d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden'])
+                  OR
+                  (d.status IS NULL AND d.outcome IS NOT NULL)
+              )
+            RETURN count(DISTINCT d.decision_id) AS v
+            """
+        )
+        return self._int_from_rows(rows, "v" if rows and "v" in rows[0] else "cnt")
+
+    def count_correct(self, domain: str) -> int:
+        domain_clause = self._domain_clause(domain)
+        rows = self._run_query(
+            f"""
+            MATCH (d:Decision)
+            OPTIONAL MATCH (d)-[:HAS_OUTCOME]->(o:Outcome)
+            WITH d, o
+            WHERE {domain_clause}
+              AND (d.archived IS NULL OR d.archived <> true)
+              AND (
+                  (d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden'] AND o.is_correct = true)
+                  OR
+                  (d.status IS NULL AND d.correct = true)
+              )
+            RETURN count(DISTINCT d.decision_id) AS cnt
             """
         )
         return self._int_from_rows(rows, "cnt")
