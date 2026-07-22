@@ -781,6 +781,7 @@ class AGEGraphStore:
         actual_action: str,
         is_correct: bool,
         metadata: Optional[Dict[str, Any]] = None,
+        domain: Optional[str] = None,
     ) -> None:
         metadata_dict = dict(metadata or {})
         actual_index = int(metadata_dict.get("actual_index", 0))
@@ -791,11 +792,19 @@ class AGEGraphStore:
         created_at = float(metadata_dict.get("created_at", verified_at))
         metadata_json = json.dumps(metadata_dict, sort_keys=True)
         status = "confirmed" if bool(is_correct) else "overridden"
+        domain_literal = self._S(self._validated_domain(domain)) if domain is not None else None
+        decision_domain_where = f"WHERE d.domain = {domain_literal}" if domain_literal is not None else ""
+        outcome_pattern = (
+            f"{{decision_id: {self._S(decision_id)}, domain: {domain_literal}}}"
+            if domain_literal is not None
+            else f"{{decision_id: {self._S(decision_id)}}}"
+        )
         query = f"""
         MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
+        {decision_domain_where}
         OPTIONAL MATCH (d)-[:HAS_OUTCOME]->(linked:Outcome)
         WITH d, count(linked) AS linked_outcome_count
-        OPTIONAL MATCH (same:Outcome {{decision_id: {self._S(decision_id)}}})
+        OPTIONAL MATCH (same:Outcome {outcome_pattern})
         WITH d, linked_outcome_count, count(same) AS same_decision_outcome_count
         WHERE linked_outcome_count = 0
           AND same_decision_outcome_count = 0
@@ -823,12 +832,20 @@ class AGEGraphStore:
         rows = self._run_query(query)
         if rows:
             return
-        self._raise_write_outcome_no_row(decision_id)
+        self._raise_write_outcome_no_row(decision_id, domain=domain)
 
-    def _raise_write_outcome_no_row(self, decision_id: str) -> None:
+    def _raise_write_outcome_no_row(self, decision_id: str, domain: Optional[str] = None) -> None:
+        domain_literal = self._S(self._validated_domain(domain)) if domain is not None else None
+        decision_domain_where = f"WHERE d.domain = {domain_literal}" if domain_literal is not None else ""
+        outcome_pattern = (
+            f"{{decision_id: {self._S(decision_id)}, domain: {domain_literal}}}"
+            if domain_literal is not None
+            else f"{{decision_id: {self._S(decision_id)}}}"
+        )
         decision_rows = self._run_query(
             f"""
             MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
+            {decision_domain_where}
             RETURN d.status AS status
             LIMIT 1
             """
@@ -838,13 +855,14 @@ class AGEGraphStore:
         linked_rows = self._run_query(
             f"""
             MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
+            {decision_domain_where}
             OPTIONAL MATCH (d)-[:HAS_OUTCOME]->(linked:Outcome)
             RETURN count(linked) AS cnt
             """
         )
         standalone_rows = self._run_query(
             f"""
-            MATCH (o:Outcome {{decision_id: {self._S(decision_id)}}})
+            MATCH (o:Outcome {outcome_pattern})
             RETURN count(o) AS cnt
             """
         )

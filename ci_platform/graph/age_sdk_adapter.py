@@ -82,13 +82,17 @@ class AGEGraphStoreAdapter:
         actual_action: str,
         is_correct: bool,
         metadata: dict[str, Any] | None = None,
+        domain: str | None = None,
     ) -> None:
-        self._store.write_outcome(
-            decision_id=decision_id,
-            actual_action=actual_action,
-            is_correct=is_correct,
-            metadata=metadata,
-        )
+        kwargs: dict[str, Any] = {
+            "decision_id": decision_id,
+            "actual_action": actual_action,
+            "is_correct": is_correct,
+            "metadata": metadata,
+        }
+        if domain is not None:
+            kwargs["domain"] = domain
+        self._store.write_outcome(**kwargs)
 
     def write_observation(
         self,
