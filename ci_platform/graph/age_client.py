@@ -824,7 +824,8 @@ class AGEClient:
         results = await self.run_query(
             """
             MATCH (d:Decision {decision_id: $did})
-            SET d.alert_id         = $alert_id,
+            SET d.domain           = COALESCE(d.domain, 'soc'),
+                d.alert_id         = $alert_id,
                 d.action           = $action,
                 d.confidence       = $confidence,
                 d.category         = $category,
@@ -846,6 +847,7 @@ class AGEClient:
                 """
                 CREATE (d:Decision {
                     decision_id:      $did,
+                    domain:           'soc',
                     alert_id:         $alert_id,
                     action:           $action,
                     confidence:       $confidence,
