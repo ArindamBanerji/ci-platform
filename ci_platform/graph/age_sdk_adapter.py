@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from ci_platform.graph.age_graph_store import AGEGraphStore
@@ -21,6 +22,10 @@ class AGEGraphStoreAdapter:
                 raise ValueError("dsn is required when store is not provided")
             store = AGEGraphStore(dsn=dsn, graph_name=graph_name)
         self._store = store
+
+    def generate_decision_id(self, domain: str) -> str:
+        """Generate a bare AGE decision ID; the primary owns prefix policy."""
+        return uuid.uuid4().hex[:12]
 
     def write_decision(
         self,

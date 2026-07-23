@@ -295,6 +295,18 @@ def test_adapter_requires_dsn_without_store():
         AGEGraphStoreAdapter()
 
 
+def test_adapter_generates_bare_unique_decision_ids():
+    from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
+
+    adapter = AGEGraphStoreAdapter(store=FakeGraphStore())
+    first = adapter.generate_decision_id("trading")
+    second = adapter.generate_decision_id("trading")
+
+    assert len(first) == len(second) == 12
+    assert all(character in "0123456789abcdef" for character in first + second)
+    assert first != second
+
+
 def test_adapter_delegates_decision_and_outcome_methods():
     from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
 
