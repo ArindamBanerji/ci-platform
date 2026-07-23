@@ -282,6 +282,9 @@ class AGEGraphStoreAdapter:
     def get_all_decisions(self, domain: str) -> list[dict[str, Any]]:
         return self._store.get_all_decisions(domain)
 
+    def get_archived_decisions(self, domain: str) -> list[dict[str, Any]]:
+        return self._store.get_archived_decisions(domain)
+
     def count_verified(self, domain: str) -> int:
         return self._store.count_verified(domain)
 

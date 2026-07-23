@@ -2039,6 +2039,31 @@ class AGEGraphStore:
         )
         return [self._node_to_dict(row.get("d", row)) for row in rows]
 
+    def get_archived_decisions(self, domain: str) -> List[Dict[str, Any]]:
+        """Return archived Decisions and their optional Outcome facts in archive order."""
+        domain_clause = self._domain_clause(domain)
+        rows = self._run_query(
+            f"""
+            MATCH (d:Decision)
+            WHERE {domain_clause}
+              AND d.archived = true
+            OPTIONAL MATCH (d)-[:HAS_OUTCOME]->(o:Outcome)
+            RETURN DISTINCT properties(d) AS d, properties(o) AS o,
+                d.created_at AS _created_at, d.decision_id AS _decision_id
+            ORDER BY _created_at, _decision_id
+            """
+        )
+        archived: List[Dict[str, Any]] = []
+        for row in rows:
+            record = self._merge_decision_outcome(row)
+            outcome = self._node_to_dict(row.get("o", {}))
+            if "actual_index" in outcome:
+                record["actual_index"] = outcome["actual_index"]
+            if "verified_at" in outcome:
+                record["verified_at"] = outcome["verified_at"]
+            archived.append(record)
+        return archived
+
     def save_centroids(
         self,
         domain: str,
@@ -2260,8 +2285,64 @@ class AGEGraphStore:
         return [self._node_to_dict(row.get("e", row)) for row in rows]
 
     def archive_old_decisions(self, domain: str, keep_recent: int = 800) -> int:
-        """AGE retention is managed externally; no in-graph archive is performed."""
-        return 0
+        """Archive all but the newest active Decisions for one domain."""
+        domain = str(domain)
+        keep_recent = max(int(keep_recent), 0)
+        domain_clause = self._domain_clause(domain)
+        active_rows = self._run_query(
+            f"""
+            MATCH (d:Decision)
+            WHERE {domain_clause}
+              AND (d.archived IS NULL OR d.archived = false)
+            RETURN count(d) AS cnt
+            """
+        )
+        active_count = self._int_from_rows(active_rows, "cnt")
+        if active_count <= keep_recent:
+            return 0
+
+        candidate_rows = self._run_query(
+            f"""
+            MATCH (d:Decision)
+            WHERE {domain_clause}
+              AND (d.archived IS NULL OR d.archived = false)
+            RETURN d.decision_id AS decision_id
+            ORDER BY d.created_at DESC, d.decision_id DESC
+            """
+        )
+        ordered_ids = [
+            str(row["decision_id"])
+            for row in candidate_rows
+            if row.get("decision_id") is not None
+        ]
+        candidate_ids = sorted(set(ordered_ids[keep_recent:]))
+        if not candidate_ids:
+            return 0
+
+        archived_at = datetime.now(timezone.utc)
+        archived_epoch = archived_at.timestamp()
+        archived_at_str = archived_at.isoformat()
+        archived_total = 0
+        for start in range(0, len(candidate_ids), 100):
+            batch = candidate_ids[start : start + 100]
+            id_list = "[" + ", ".join(self._S(value) for value in batch) + "]"
+            rows = self._run_query(
+                f"""
+                MATCH (d:Decision)
+                WHERE {domain_clause}
+                  AND (d.archived IS NULL OR d.archived = false)
+                  AND d.decision_id IN {id_list}
+                SET d.archived = true,
+                    d.archived_at = {float(archived_epoch)},
+                    d.archived_at_str = {self._S(archived_at_str)},
+                    d.archive_reason = 'retention_window',
+                    d.archive_status = 'archived',
+                    d.archived_from_status = d.status
+                RETURN count(d) AS cnt
+                """
+            )
+            archived_total += self._int_from_rows(rows, "cnt")
+        return archived_total
 
     def count_archived(self, domain: str) -> int:
         rows = self._run_query(
