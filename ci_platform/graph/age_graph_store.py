@@ -1564,6 +1564,7 @@ class AGEGraphStore:
             MATCH (d:Decision)
             {where_clause}
             RETURN d
+            ORDER BY d.created_at, d.decision_id
             LIMIT {limit_value}
             """
         )
@@ -1580,9 +1581,11 @@ class AGEGraphStore:
                   (d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden'])
                   OR
                   (d.status IS NULL AND d.outcome IS NOT NULL)
-              )
+            )
             OPTIONAL MATCH (d)-[:HAS_OUTCOME]->(o:Outcome)
-            RETURN DISTINCT properties(d) AS d, properties(o) AS o
+            RETURN DISTINCT properties(d) AS d, properties(o) AS o,
+                d.created_at AS _created_at, d.decision_id AS _decision_id
+            ORDER BY _created_at, _decision_id
             """
         )
         return [self._merge_decision_outcome(row) for row in rows]
@@ -2024,7 +2027,17 @@ class AGEGraphStore:
         }
 
     def get_all_decisions(self, domain: str) -> List[Dict[str, Any]]:
-        return self.get_decisions(domain)
+        domain_clause = self._domain_clause(domain)
+        rows = self._run_query(
+            f"""
+            MATCH (d:Decision)
+            WHERE {domain_clause}
+              AND (d.archived IS NULL OR d.archived <> true)
+            RETURN d
+            ORDER BY d.created_at, d.decision_id
+            """
+        )
+        return [self._node_to_dict(row.get("d", row)) for row in rows]
 
     def save_centroids(
         self,
