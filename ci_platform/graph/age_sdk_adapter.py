@@ -265,8 +265,8 @@ class AGEGraphStoreAdapter:
             domain=domain,
         )
 
-    def get_decision(self, decision_id: str) -> dict[str, Any] | None:
-        return self._store.get_decision(decision_id)
+    def get_decision(self, decision_id: str, domain: str | None = None) -> dict[str, Any] | None:
+        return self._store.get_decision(decision_id, domain=domain)
 
     def get_decisions(
         self,

@@ -1539,10 +1539,12 @@ class AGEGraphStore:
             return
         raise RuntimeError(f"AGE link_entity returned no rows for decision_id: {decision_id}")
 
-    def get_decision(self, decision_id: str) -> Optional[Dict[str, Any]]:
+    def get_decision(self, decision_id: str, domain: str | None = None) -> Optional[Dict[str, Any]]:
+        domain_clause = f"WHERE d.domain = {self._S(domain)}" if domain is not None else ""
         rows = self._run_query(
             f"""
             MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
+            {domain_clause}
             RETURN d
             LIMIT 1
             """
