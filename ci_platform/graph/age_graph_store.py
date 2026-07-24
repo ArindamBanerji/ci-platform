@@ -2587,6 +2587,9 @@ class AGEGraphStore:
                 "is_correct": outcome.get("is_correct"),
             }
         )
+        for field in ("actual_index", "verified_at"):
+            if field in outcome:
+                merged[field] = outcome[field]
         if "metadata" in outcome:
             merged["outcome_metadata"] = outcome["metadata"]
         return merged
