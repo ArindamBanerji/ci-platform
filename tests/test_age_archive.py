@@ -175,6 +175,7 @@ def test_active_reads_and_d2_counts_exclude_archived_decisions() -> None:
     store.archive_old_decisions("trading", keep_recent=3)
 
     assert len(store.get_all_decisions("trading")) == 3
+    assert len(store.get_decisions("trading")) == 3
     assert store.count_verified("trading") == 0
 
 

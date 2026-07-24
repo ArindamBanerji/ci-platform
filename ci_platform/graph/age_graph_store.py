@@ -1555,7 +1555,10 @@ class AGEGraphStore:
         self, domain: str, category: Optional[str] = None, limit: int = 400
     ) -> List[Dict[str, Any]]:
         limit_value = self._safe_limit(limit)
-        clauses = [f"d.domain = {self._S(domain)}"]
+        clauses = [
+            f"d.domain = {self._S(domain)}",
+            "(d.archived IS NULL OR d.archived <> true)",
+        ]
         if category is not None:
             clauses.append(f"d.category = {self._S(category)}")
         where_clause = "WHERE " + " AND ".join(clauses)
