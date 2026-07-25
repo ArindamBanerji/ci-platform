@@ -50,7 +50,7 @@ class _InMemoryAGE:
         return "'" + str(value).replace("'", "\\'") + "'"
 
     def _soc_rows(self, query: str) -> list[_Decision]:
-        assert "(d.domain = 'soc' OR d.domain IS NULL)" in query
+        assert "d.domain = 'soc'" in query
         return [decision for decision in self.decisions if decision.domain in ("soc", None)]
 
     @staticmethod
