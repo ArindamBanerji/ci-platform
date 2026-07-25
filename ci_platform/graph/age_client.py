@@ -18,10 +18,8 @@ Connection model:
   - Opt-in fallback: serialized warm connection reuse when psycopg_pool is absent
   - All public methods are async (interface parity with Neo4jClient)
 
-Environment variables:
-  DATABASE_URL    = postgresql://user:pass@host:5432/dbname
-  AGE_GRAPH_NAME  = soc_graph (default)
-  GRAPH_BACKEND   = age | neo4j (default: neo4j during transition)
+Connection configuration is supplied explicitly by callers. Domain services
+resolve DSN and graph through GraphConfig before constructing this client.
 """
 
 from __future__ import annotations
@@ -36,16 +34,12 @@ import re
 import threading
 import time
 import uuid
-import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, TypeVar, cast
 
 import psycopg  # sync only — no AsyncConnection anywhere
 
 logger = logging.getLogger(__name__)
-
-GRAPH_NAME = os.getenv("AGE_GRAPH_NAME", "soc_graph")
-
 
 def _with_sslmode_disabled(dsn: str) -> str:
     if "sslmode" in dsn:
@@ -54,20 +48,6 @@ def _with_sslmode_disabled(dsn: str) -> str:
     return f"{dsn}{sep}sslmode=disable"
 
 
-def _resolve_database_url() -> str:
-    for name in ("GRAPH_DSN", "AGE_DSN", "DATABASE_URL"):
-        value = os.getenv(name, "").strip()
-        if value:
-            return _with_sslmode_disabled(value)
-    warnings.warn(
-        "No GRAPH_DSN set - using localhost fallback. "
-        "Set GRAPH_DSN with WSL2 NAT IP per Rule #40.",
-        stacklevel=2,
-    )
-    return _with_sslmode_disabled("postgresql://localhost:5432/soc_copilot")
-
-
-DATABASE_URL = _resolve_database_url()
 _PSYCOPG_POOL_AVAILABLE = importlib.util.find_spec("psycopg_pool") is not None
 
 _DESTRUCTIVE_SET_RE = re.compile(r'\bSET\s+(\w+)\s*=\s*\{')
@@ -123,7 +103,7 @@ class AGEClient:
 
     All domain copilots (SOC, S2P) use this via:
         from ci_platform.graph import get_graph_client
-        graph = get_graph_client()
+        graph = get_graph_client(dsn=config.dsn, graph_name=config.graph)
         results = await graph.run_query(cypher, params)
 
     DB I/O uses sync psycopg inside asyncio.to_thread() — safe for
@@ -138,10 +118,12 @@ class AGEClient:
         pool_min_size: Optional[int] = None,
         pool_max_size: Optional[int] = None,
     ) -> None:
-        self._dsn = dsn or DATABASE_URL
-        self._graph = graph_name or GRAPH_NAME
-        if not self._dsn:
-            raise ValueError("DATABASE_URL is required for AGEClient")
+        if dsn is None or not str(dsn).strip():
+            raise ValueError("explicit dsn is required for AGEClient")
+        if graph_name is None or not str(graph_name).strip():
+            raise ValueError("explicit graph_name is required for AGEClient")
+        self._dsn = _with_sslmode_disabled(str(dsn).strip())
+        self._graph = str(graph_name).strip()
         self._pool_requested = _env_truthy("AGE_USE_POOL") if use_pool is None else bool(use_pool)
         self._pool_min_size = pool_min_size if pool_min_size is not None else _env_int("AGE_POOL_MIN_SIZE", 1)
         self._pool_max_size = pool_max_size if pool_max_size is not None else _env_int("AGE_POOL_MAX_SIZE", 5)
@@ -1102,21 +1084,18 @@ class AGETransaction:
 _client: Optional[AGEClient] = None
 
 
-def get_graph_client(
-    dsn: Optional[str] = None,
-    graph_name: Optional[str] = None,
-) -> AGEClient:
+def get_graph_client(dsn: str, graph_name: str) -> AGEClient:
     """
     Return the shared AGEClient singleton.
 
-    Usage in any copilot:
+    Usage in any copilot (DSN and graph are resolved by GraphConfig):
         from ci_platform.graph import get_graph_client
-        graph = get_graph_client()
+        graph = get_graph_client(dsn=config.dsn, graph_name=config.graph)
         results = await graph.run_query(cypher, params)
 
     During Block 8.5 transition in SOC repo:
         from ci_platform.graph import get_graph_client as _age_factory
-        neo4j_client = _age_factory()
+        neo4j_client = _age_factory(dsn=config.dsn, graph_name=config.graph)
     """
     global _client
     if _client is None:

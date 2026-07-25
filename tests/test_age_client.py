@@ -27,12 +27,26 @@ def test_age_client_imports_cleanly():
     assert AGEClient is not None
 
 
+def test_age_client_requires_explicit_connection_configuration():
+    from ci_platform.graph.age_client import AGEClient
+
+    with pytest.raises(ValueError, match="explicit dsn"):
+        AGEClient()
+
+    with pytest.raises(ValueError, match="explicit graph_name"):
+        AGEClient(dsn="postgresql://localhost:5432/test")
+
+
 def test_get_graph_client_returns_singleton():
     """get_graph_client() returns same instance on repeated calls."""
     import ci_platform.graph.age_client as mod
     mod._client = None  # Reset singleton for test isolation
-    c1 = mod.get_graph_client()
-    c2 = mod.get_graph_client()
+    c1 = mod.get_graph_client(
+        dsn="postgresql://localhost:5432/test", graph_name="test_graph"
+    )
+    c2 = mod.get_graph_client(
+        dsn="postgresql://localhost:5432/test", graph_name="test_graph"
+    )
     assert c1 is c2
     mod._client = None  # Cleanup
 
@@ -184,7 +198,7 @@ def test_run_query_no_datetime_in_cypher():
 def test_rejects_destructive_set():
     """SET n = {} is forbidden — it wipes all properties."""
     from ci_platform.graph.age_client import AGEClient
-    client = AGEClient()
+    client = AGEClient(dsn="postgresql://localhost:5432/test", graph_name="test_graph")
     with pytest.raises(ValueError, match="replaces ALL properties"):
         asyncio.run(client.run_query("MATCH (t:Test) SET t = {a: 1}"))
 
@@ -199,7 +213,7 @@ def test_allows_safe_set_patterns():
 def test_rejects_merge_node_label():
     """MERGE (n:Label {prop: val}) is rejected — AGE does not support MERGE."""
     from ci_platform.graph.age_client import AGEClient
-    client = AGEClient()
+    client = AGEClient(dsn="postgresql://localhost:5432/test", graph_name="test_graph")
     with pytest.raises(ValueError, match="MERGE is not supported"):
         asyncio.run(client.run_query("MERGE (n:Decision {decision_id: 'x'}) RETURN n"))
 
@@ -414,7 +428,7 @@ def run_async(coro):
 @INTEGRATION_SKIP
 def test_age_graph_queryable():
     from ci_platform.graph.age_client import AGEClient
-    client = AGEClient()
+    client = AGEClient(dsn="postgresql://localhost:5432/test", graph_name="test_graph")
     run_async(client.ensure_graph())
     results = run_async(client.run_query(
         "MATCH (n) RETURN count(n) AS cnt"
@@ -426,7 +440,7 @@ def test_age_graph_queryable():
 @INTEGRATION_SKIP
 def test_age_entity_node_create_idempotent():
     from ci_platform.graph.age_client import AGEClient
-    client = AGEClient()
+    client = AGEClient(dsn="postgresql://localhost:5432/test", graph_name="test_graph")
     for _ in range(3):
         existing = run_async(client.run_query(
             "MATCH (e:Entity {entity_id: $eid}) RETURN e",
@@ -447,7 +461,7 @@ def test_age_entity_node_create_idempotent():
 @INTEGRATION_SKIP
 def test_age_triggered_evolution_traversal():
     from ci_platform.graph.age_client import AGEClient
-    client = AGEClient()
+    client = AGEClient(dsn="postgresql://localhost:5432/test", graph_name="test_graph")
     if not run_async(client.run_query(
         "MATCH (a:Alert {alert_id: $aid}) RETURN a",
         parameters={"aid": "TEST-AGE-ALT-001"}
@@ -478,7 +492,7 @@ def test_age_triggered_evolution_traversal():
 @INTEGRATION_SKIP
 def test_age_campaign_entity():
     from ci_platform.graph.age_client import AGEClient
-    client = AGEClient()
+    client = AGEClient(dsn="postgresql://localhost:5432/test", graph_name="test_graph")
     if not run_async(client.run_query(
         "MATCH (c:Campaign {campaign_id: $cid}) RETURN c",
         parameters={"cid": "TEST-CAMP-001"}
@@ -509,7 +523,7 @@ def test_age_campaign_entity():
 def test_backlog015_decision_distance_log():
     import json
     from ci_platform.graph.age_client import AGEClient
-    client = AGEClient()
+    client = AGEClient(dsn="postgresql://localhost:5432/test", graph_name="test_graph")
     run_async(client.log_decision_distance(
         decision_id="TEST-B015-001",
         centroid_distance_to_canonical=2.847,
@@ -527,7 +541,7 @@ def test_backlog015_decision_distance_log():
 @INTEGRATION_SKIP
 def test_age_create_idempotent():
     from ci_platform.graph.age_client import AGEClient
-    client = AGEClient()
+    client = AGEClient(dsn="postgresql://localhost:5432/test", graph_name="test_graph")
     for _ in range(3):
         existing = run_async(client.run_query(
             "MATCH (t:ThreatIndicator {value: $val}) RETURN t",
