@@ -1100,4 +1100,16 @@ def get_graph_client(dsn: str, graph_name: str) -> AGEClient:
     global _client
     if _client is None:
         _client = AGEClient(dsn=dsn, graph_name=graph_name)
+    else:
+        requested_dsn = _with_sslmode_disabled(str(dsn).strip())
+        requested_graph = str(graph_name).strip()
+        if _client._dsn != requested_dsn or _client._graph != requested_graph:
+            logger.warning(
+                "AGE graph client singleton configuration mismatch: "
+                "existing_dsn=%s requested_dsn=%s existing_graph=%s requested_graph=%s",
+                redact_dsn(_client._dsn),
+                redact_dsn(requested_dsn),
+                _client._graph,
+                requested_graph,
+            )
     return _client
