@@ -460,11 +460,30 @@ class AGEGraphStoreAdapter:
             edge_type=edge_type,
         )
 
-    def get_decision_links(self, decision_id: str | None = None) -> list[dict[str, Any]]:
-        return self._store.get_decision_links(decision_id=decision_id)
+    def get_decision_links(
+        self,
+        decision_id: str | None = None,
+        domain: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        kwargs: dict[str, Any] = {"decision_id": decision_id}
+        if domain is not None:
+            kwargs["domain"] = domain
+        if limit is not None:
+            kwargs["limit"] = limit
+        return self._store.get_decision_links(**kwargs)
 
-    def query_context(self, entity_id: str, max_depth: int) -> list[dict[str, Any]]:
-        return self._store.query_context(entity_id=str(entity_id), hops=int(max_depth))
+    def query_context(
+        self,
+        entity_id: str,
+        max_depth: int,
+        domain: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._store.query_context(
+            entity_id=str(entity_id),
+            hops=int(max_depth),
+            domain=domain,
+        )
 
     def query_similar(self, entity_id: str, limit: int) -> list[dict[str, Any]]:
         return self._store.query_similar(decision_id=str(entity_id), limit=int(limit))

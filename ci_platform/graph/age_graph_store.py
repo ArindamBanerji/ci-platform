@@ -553,8 +553,7 @@ class AGEGraphStore:
     def _domain_clause(self, domain: str) -> str:
         value = self._validated_domain(domain)
         literal = self._S(value)
-        # Legacy SOC Decisions may have no domain property.
-        return f"(d.domain = {literal} OR d.domain IS NULL)" if value == "soc" else f"d.domain = {literal}"
+        return f"d.domain = {literal}"
 
     def write_decision(
         self,
@@ -2096,6 +2095,7 @@ class AGEGraphStore:
         if decision_id:
             query = f"""
             MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
+            WHERE d.domain = {self._S(domain)}
             WITH d LIMIT 1
             CREATE (c:CentroidCheckpoint {props})
             CREATE (d)-[:HAS_CENTROID_CHECKPOINT]->(c)
@@ -2155,12 +2155,15 @@ class AGEGraphStore:
         decision_id: str,
         entity_id: str,
         edge_type: str = "DECIDED_ON",
+        domain: str | None = None,
     ) -> None:
         edge_label = self._safe_edge_type(edge_type)
         created_at = datetime.now(timezone.utc).isoformat()
         props = self._link_props(decision_id, entity_id, edge_label, created_at)
+        domain_clause = f"WHERE d.domain = {self._S(domain)}" if domain is not None else ""
         query = f"""
         MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
+        {domain_clause}
         MATCH (e {{entity_id: {self._S(entity_id)}}})
         WITH d, e LIMIT 1
         CREATE (d)-[:{edge_label} {{
@@ -2175,10 +2178,17 @@ class AGEGraphStore:
         if not rows:
             self._run_query(f"CREATE (l:DecisionEntityLink {props}) RETURN l")
 
-    def get_decision_links(self, decision_id: str | None = None) -> List[Dict[str, Any]]:
+    def get_decision_links(
+        self, decision_id: str | None = None, domain: str | None = None
+    ) -> List[Dict[str, Any]]:
+        relationship_clauses = []
+        if decision_id is not None:
+            relationship_clauses.append(f"d.decision_id = {self._S(decision_id)}")
+        if domain is not None:
+            relationship_clauses.append(f"d.domain = {self._S(domain)}")
         where_relationship = (
-            f"WHERE d.decision_id = {self._S(decision_id)}"
-            if decision_id is not None
+            "WHERE " + " AND ".join(relationship_clauses)
+            if relationship_clauses
             else ""
         )
         relationship_rows = self._run_query(
@@ -2191,14 +2201,16 @@ class AGEGraphStore:
                    r.created_at AS created_at
             """
         )
-        where_link = (
-            f"WHERE l.decision_id = {self._S(decision_id)}"
-            if decision_id is not None
-            else ""
-        )
+        link_clauses = []
+        if decision_id is not None:
+            link_clauses.append(f"l.decision_id = {self._S(decision_id)}")
+        if domain is not None:
+            link_clauses.append(f"d.domain = {self._S(domain)}")
+        where_link = "WHERE " + " AND ".join(link_clauses) if link_clauses else ""
         link_rows = self._run_query(
             f"""
             MATCH (l:DecisionEntityLink)
+            MATCH (d:Decision {{decision_id: l.decision_id}})
             {where_link}
             RETURN l
             """
@@ -2524,11 +2536,24 @@ class AGEGraphStore:
             """
         )
 
-    def query_context(self, entity_id: str, hops: int = 2) -> List[Dict[str, Any]]:
+    def query_context(
+        self,
+        entity_id: str,
+        hops: int = 2,
+        domain: str | None = None,
+    ) -> List[Dict[str, Any]]:
         hop_count = self._safe_hops(hops)
+        domain_clause = ""
+        if domain is not None:
+            domain_value = self._validated_domain(domain)
+            domain_clause = (
+                "WHERE n.domain IS NULL "
+                f"OR n.domain = {self._S(domain_value)}"
+            )
         rows = self._run_query(
             f"""
             MATCH p = (e {{entity_id: {self._S(entity_id)}}})-[*1..{hop_count}]-(n)
+            {domain_clause}
             RETURN p
             LIMIT 100
             """
@@ -2541,7 +2566,7 @@ class AGEGraphStore:
             f"""
             MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
             MATCH (s:Decision {{category: d.category}})
-            WHERE s.decision_id <> d.decision_id
+            WHERE s.decision_id <> d.decision_id AND s.domain = d.domain
             RETURN s
             LIMIT {limit_value}
             """

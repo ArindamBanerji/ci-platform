@@ -718,7 +718,7 @@ class AGEClient:
         try:
             results = await self.run_query(
                 "MATCH (d:Decision) "
-                "WHERE (d.domain = 'soc' OR d.domain IS NULL) "
+                "WHERE d.domain = 'soc' "
                 "AND (d.archived IS NULL OR d.archived <> true) "
                 "AND ("
                 "(d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden']) "
@@ -735,7 +735,7 @@ class AGEClient:
         try:
             results = await self.run_query(
                 "MATCH (d:Decision) "
-                "WHERE (d.domain = 'soc' OR d.domain IS NULL) "
+                "WHERE d.domain = 'soc' "
                 "AND (d.archived IS NULL OR d.archived <> true) "
                 "AND d.correct = true "
                 "RETURN count(DISTINCT d.decision_id) AS cnt"
