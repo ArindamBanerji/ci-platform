@@ -106,3 +106,15 @@ Use `SET n.prop = val` or `SET n += {props}`.
    - AGE integration tests require: `$env:AGE_INTEGRATION = "1"`
 2. Run consumer repo: `cd ../gen-ai-roi-demo-v4-v50/backend && python -m pytest -v`
 3. If you changed a Cypher query: run it standalone against AGE first.
+
+## Rule #63 — Test Double Completeness
+
+No mock/monkeypatch in test code unless the external dependency is
+truly unreachable (network, hardware, paid API). Test doubles must
+be complete — track state and answer queries from their own state.
+
+If a test double needs monkeypatching to work with new code, the
+test double is incomplete. Fix the double, not the caller.
+
+Retroactive audit needed: check all existing monkeypatch usage
+against this rule. Violations are technical debt, not exceptions.
