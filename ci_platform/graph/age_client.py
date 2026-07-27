@@ -614,41 +614,103 @@ class AGEClient:
     async def get_sequence_count(
         self, entity_id: str, window_minutes: int = 60
     ) -> int:
-        """R2 referral rule. Cutoff computed with Python timedelta, not Cypher duration."""
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
-        ).isoformat()
-        results = await self.run_query(
-            """
-            MATCH (a:Alert)-[:INVOLVES]->(e:Entity {entity_id: $eid})
-            WHERE a.timestamp >= $cutoff
-            RETURN count(a) AS cnt
-            """,
-            {"eid": entity_id, "cutoff": cutoff},
-        )
+        """Count recent SOC Decisions for one source entity (R2)."""
+        if not entity_id:
+            return 0
         try:
+            window_start = int(
+                (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).timestamp()
+                * 1000
+            )
+            results = await self.run_query(
+                f"""
+                MATCH (d:Decision)
+                WHERE d.domain = 'soc'
+                  AND (d.archived IS NULL OR d.archived <> true)
+                  AND d.source_id = {self._S(entity_id)}
+                  AND d.timestamp_epoch > {window_start}
+                RETURN count(d) AS cnt
+                """
+            )
             return int(results[0]["cnt"]) if results else 0
-        except (TypeError, ValueError):
+        except Exception:
             return 0
 
     async def get_cross_category_count(
         self, entity_id: str, window_minutes: int = 60
     ) -> int:
-        """R7 referral rule. Cutoff computed with Python timedelta, not Cypher duration."""
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
-        ).isoformat()
-        results = await self.run_query(
-            """
-            MATCH (a:Alert)-[:INVOLVES]->(e:Entity {entity_id: $eid})
-            WHERE a.timestamp >= $cutoff
-            RETURN count(DISTINCT a.category) AS cnt
-            """,
-            {"eid": entity_id, "cutoff": cutoff},
-        )
+        """Count recent distinct SOC Decision categories for one user (R7)."""
+        if not entity_id:
+            return 0
         try:
+            window_start = int(
+                (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).timestamp()
+                * 1000
+            )
+            results = await self.run_query(
+                f"""
+                MATCH (d:Decision)
+                WHERE d.domain = 'soc'
+                  AND (d.archived IS NULL OR d.archived <> true)
+                  AND d.user_id = {self._S(entity_id)}
+                  AND d.timestamp_epoch > {window_start}
+                RETURN count(DISTINCT d.category) AS cnt
+                """
+            )
             return int(results[0]["cnt"]) if results else 0
-        except (TypeError, ValueError):
+        except Exception:
+            return 0
+
+    async def _legacy_sequence_count(
+        self, source_id: str, window_seconds: int = 3600
+    ) -> int:
+        """Alert-based sequence count preserved for shadow comparison.
+
+        This is the original Alert-to-Entity query path. Delete after shadow
+        comparison proves zero discrepancy with the Decision-based path.
+        """
+        if not source_id:
+            return 0
+        try:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+            ).isoformat()
+            results = await self.run_query(
+                """
+                MATCH (a:Alert)-[:INVOLVES]->(e:Entity {entity_id: $eid})
+                WHERE a.timestamp >= $cutoff
+                RETURN count(a) AS cnt
+                """,
+                {"eid": source_id, "cutoff": cutoff},
+            )
+            return int(results[0]["cnt"]) if results else 0
+        except Exception:
+            return 0
+
+    async def _legacy_cross_category_count(
+        self, user_id: str, window_seconds: int = 3600
+    ) -> int:
+        """Alert-based category count preserved for shadow comparison.
+
+        This is the original Alert-to-Entity query path. Delete after shadow
+        comparison proves zero discrepancy with the Decision-based path.
+        """
+        if not user_id:
+            return 0
+        try:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+            ).isoformat()
+            results = await self.run_query(
+                """
+                MATCH (a:Alert)-[:INVOLVES]->(e:Entity {entity_id: $eid})
+                WHERE a.timestamp >= $cutoff
+                RETURN count(DISTINCT a.category) AS cnt
+                """,
+                {"eid": user_id, "cutoff": cutoff},
+            )
+            return int(results[0]["cnt"]) if results else 0
+        except Exception:
             return 0
 
     async def count_verified_decisions(self) -> int:
@@ -806,6 +868,7 @@ class AGEClient:
         results = await self.run_query(
             """
             MATCH (d:Decision {decision_id: $did})
+            WHERE d.domain = 'soc'
             SET d.domain           = COALESCE(d.domain, 'soc'),
                 d.alert_id         = $alert_id,
                 d.action           = $action,
@@ -847,6 +910,18 @@ class AGEClient:
                 """,
                 params,
             )
+
+        # Preserve the source Neo4jClient contract: every Decision trace is
+        # linked to its Alert through DECIDED_ON.
+        await self.run_query(
+            """
+            MATCH (a:Alert {alert_id: $alert_id})
+            MATCH (d:Decision {decision_id: $did})
+            WHERE d.domain = 'soc'
+            CREATE (d)-[:DECIDED_ON]->(a)
+            """,
+            params,
+        )
 
         # Two-step MATCH-then-CREATE for DecisionContext node.
         if patterns_matched:
@@ -906,6 +981,7 @@ class AGEClient:
             await self.run_query(
                 """
                 MATCH (d:Decision {decision_id: $triggered_by})
+                WHERE d.domain = 'soc'
                 CREATE (e:EvolutionEvent {
                     id:              $evt_id,
                     event_type:      $evt_type,
