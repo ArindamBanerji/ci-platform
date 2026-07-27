@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 
 import pytest
+from copilot_sdk.testing import age_available
 
 from ci_platform.copilot_core.counters import (
     AGECounterStore,
@@ -29,7 +30,6 @@ PROTECTED_GRAPH_NAMES = {
     "soc_graph_pool_c9b_250_1",
     "soc_graph_pool_c9b_250_strict_1",
 }
-AGE_INTEGRATION = os.getenv("AGE_INTEGRATION", "0") == "1"
 DEFAULT_DSN = "host=localhost port=5433 dbname=soc_copilot user=postgres password=postgres"
 
 
@@ -80,12 +80,12 @@ async def _read_user_counter(client: AGEClient, user_id: str, prop: str) -> int 
 
 
 @pytest.mark.skipif(
-    not AGE_INTEGRATION,
-    reason="AGE_INTEGRATION != 1; skipping P2C live AGE counter proof",
+    not age_available(),
+    reason="AGE not reachable",
 )
 @pytest.mark.asyncio
 async def test_p2c_live_age_entity_property_counter_proof():
-    graph_name = os.getenv("AGE_COUNTER_P2C_GRAPH") or os.getenv("AGE_GRAPH_NAME", SCRATCH_GRAPH)
+    graph_name = os.getenv("AGE_COUNTER_P2C_GRAPH") or SCRATCH_GRAPH
     _assert_safe_graph(graph_name)
     client = AGEClient(
         dsn=os.getenv("GRAPH_DSN") or os.getenv("DATABASE_URL") or DEFAULT_DSN,
@@ -293,3 +293,4 @@ async def test_p2c_live_age_entity_property_counter_proof():
             """,
             {"category_id": category_id},
         )
+

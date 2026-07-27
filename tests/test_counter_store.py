@@ -5,6 +5,7 @@ import os
 import uuid
 
 import pytest
+from copilot_sdk.testing import age_available
 
 from ci_platform.copilot_core.counters import (
     AGECounterStore,
@@ -296,19 +297,19 @@ def test_soc_counter_defs_are_explicit_and_domain_scoped():
     assert cross_category.distinct_label == "Category"
 
 
-AGE_INTEGRATION = os.getenv("AGE_INTEGRATION", "0") == "1"
 
 
 @pytest.mark.skipif(
-    not AGE_INTEGRATION,
-    reason="AGE_INTEGRATION != 1; skipping live AGE counter compatibility test",
+    not age_available(),
+    reason="AGE not reachable",
 )
 @pytest.mark.asyncio
 async def test_live_age_entity_property_counter_shapes():
     from ci_platform.graph.age_client import AGEClient
 
-    graph_name = os.getenv("AGE_GRAPH_NAME", "soc_graph")
-    client = AGEClient(graph_name=graph_name)
+    dsn = os.getenv("AGE_TEST_DSN", "host=localhost port=5433 dbname=soc_copilot user=postgres password=postgres")
+    graph_name = os.getenv("AGE_COUNTER_GRAPH", "ci_counter_compat")
+    client = AGEClient(dsn=dsn, graph_name=graph_name)
     await client.ensure_graph()
     store = AGECounterStore(client)
     run_id = f"counter-store-live-{uuid.uuid4().hex}"
@@ -383,3 +384,4 @@ async def test_live_age_entity_property_counter_shapes():
             """,
             {"category_id": category_id},
         )
+

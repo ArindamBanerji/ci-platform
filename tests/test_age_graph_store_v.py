@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from copilot_sdk.testing import age_available
 
 
 @dataclass
@@ -288,9 +289,12 @@ def test_sqlite_d2_lifecycle_parity_in_memory():
 
 
 def test_live_soc_gate():
-    dsn = os.getenv("GRAPH_DSN")
-    if not (dsn and os.getenv("AGE_D2_LIVE_GATE") == "1"):
-        pytest.skip("set GRAPH_DSN and AGE_D2_LIVE_GATE=1 to run the live SOC gate")
+    if not age_available():
+        pytest.skip("AGE not reachable")
+    dsn = os.getenv(
+        "AGE_TEST_DSN",
+        "host=localhost port=5433 dbname=soc_copilot user=postgres password=postgres",
+    )
 
     from ci_platform.graph.age_client import AGEClient
     from ci_platform.graph.age_graph_store import AGEGraphStore
@@ -321,4 +325,25 @@ def test_live_soc_gate():
 
 
 def test_trading_gate_after_phase_3():
-    pytest.skip("Phase 3 gate: assert count_verified(store, 'trading') >= 150 after migration")
+    if not age_available():
+        pytest.skip("AGE not reachable")
+    from ci_platform.graph.age_client import AGEClient
+
+    dsn = os.getenv(
+        "AGE_TEST_DSN",
+        "host=localhost port=5433 dbname=soc_copilot user=postgres password=postgres",
+    )
+    client = AGEClient(dsn=dsn, graph_name="soc_graph")
+    try:
+        rows = asyncio.run(client.run_query(
+            "MATCH (d:Decision) WHERE d.domain = 'trading' "
+            "AND (d.archived IS NULL OR d.archived <> true) "
+            "AND d.correct IS NOT NULL RETURN count(d) AS cnt"
+        ))
+        count = int(rows[0]["cnt"]) if rows else 0
+        if count == 0:
+            pytest.skip("soc_graph has no trading migration data")
+        assert count >= 150
+    finally:
+        asyncio.run(client.close())
+

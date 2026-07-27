@@ -10,6 +10,7 @@ import uuid
 from typing import Any
 
 import pytest
+from copilot_sdk.testing import age_available
 
 from ci_platform.copilot_core.counters import AGECounterStore, CounterDef
 from ci_platform.graph.age_client import AGEClient
@@ -28,7 +29,6 @@ PROTECTED_GRAPH_NAMES = {
     "soc_graph_pool_c9b_250_1",
     "soc_graph_pool_c9b_250_strict_1",
 }
-AGE_INTEGRATION = os.getenv("AGE_INTEGRATION", "0") == "1"
 DEFAULT_DSN = "host=localhost port=5433 dbname=soc_copilot user=postgres password=postgres"
 
 
@@ -237,12 +237,12 @@ async def _cleanup(client: AGEClient, run_id: str) -> dict[str, int]:
 
 
 @pytest.mark.skipif(
-    not AGE_INTEGRATION,
-    reason="AGE_INTEGRATION != 1; skipping P2D live AGE route-readiness proof",
+    not age_available(),
+    reason="AGE not reachable",
 )
 @pytest.mark.asyncio
 async def test_p2d_live_age_counter_route_readiness_and_parity():
-    graph_name = os.getenv("AGE_COUNTER_P2D_GRAPH") or os.getenv("AGE_GRAPH_NAME", SCRATCH_GRAPH)
+    graph_name = os.getenv("AGE_COUNTER_P2D_GRAPH") or SCRATCH_GRAPH
     _assert_safe_graph(graph_name)
     dsn = os.getenv("GRAPH_DSN") or os.getenv("DATABASE_URL") or DEFAULT_DSN
     client = AGEClient(dsn=dsn, graph_name=graph_name, use_pool=True)
@@ -517,3 +517,4 @@ async def test_p2d_live_age_counter_route_readiness_and_parity():
             )
             assert all(value == 0 for value in cleanup_counts_after.values()), cleanup_counts_after
         await client.close()
+

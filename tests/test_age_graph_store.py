@@ -6,6 +6,7 @@ import time
 import uuid
 
 import pytest
+from copilot_sdk.testing import age_available
 
 
 class FakeTransaction:
@@ -2040,12 +2041,11 @@ def test_close_swallows_exceptions(fake_age_client, monkeypatch):
 
 
 GRAPH_DSN = os.getenv("GRAPH_DSN")
-AGE_LIVE_STORE_TESTS = os.getenv("AGE_LIVE_STORE_TESTS") == "1"
 
 
 @pytest.mark.skipif(
-    not AGE_LIVE_STORE_TESTS,
-    reason="AGE_LIVE_STORE_TESTS=1 required; skipping live AGE store tests",
+    not age_available(),
+    reason="AGE not reachable",
 )
 class TestAGEGraphStoreLive:
     graph_name = None
@@ -2121,3 +2121,4 @@ class TestAGEGraphStoreLive:
         )
         store.save_evolution_event("soc", "rejected", "factor_rule", "variant-live-empty")
         store.close()
+

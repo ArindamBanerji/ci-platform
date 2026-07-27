@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from copilot_sdk.testing import age_available
 
 
 class FakeGraphStore:
@@ -676,12 +677,11 @@ def test_adapter_source_has_no_forbidden_imports_or_vocab():
 
 
 GRAPH_DSN = os.getenv("GRAPH_DSN")
-AGE_LIVE_STORE_TESTS = os.getenv("AGE_LIVE_STORE_TESTS") == "1"
 
 
 @pytest.mark.skipif(
-    not AGE_LIVE_STORE_TESTS,
-    reason="AGE_LIVE_STORE_TESTS=1 required; skipping live AGE store tests",
+    not age_available(),
+    reason="AGE not reachable",
 )
 class TestAGEGraphStoreAdapterLive:
     graph_name = None
@@ -742,3 +742,4 @@ class TestAGEGraphStoreAdapterLive:
         adapter.save_evolution_event("soc", "variant_generated", "threshold_rule", "variant-live")
         adapter.save_centroids("soc", "price_variance", [[0.1, 0.2]], decision_id="DEC-live")
         adapter.close()
+
