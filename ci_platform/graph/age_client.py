@@ -633,6 +633,8 @@ class AGEClient:
                 """
             )
             return int(results[0]["cnt"]) if results else 0
+        # Intentional: shadow comparison requires both paths to return 0 on
+        # failure for parity. Remove after the shadow comparison gate closes.
         except Exception:
             return 0
 
@@ -658,6 +660,8 @@ class AGEClient:
                 """
             )
             return int(results[0]["cnt"]) if results else 0
+        # Intentional: shadow comparison requires both paths to return 0 on
+        # failure for parity. Remove after the shadow comparison gate closes.
         except Exception:
             return 0
 
@@ -752,21 +756,19 @@ class AGEClient:
         with count_verified_decisions() above. Bootstrap decisions carry a
         'category' field from migration.
         """
-        try:
-            results = await self.run_query(
-                """
-                MATCH (d:Decision)
-                WHERE d.category IS NOT NULL
-                RETURN d.category AS category, count(d) AS cnt
-                """
-            )
-            return {
-                r["category"]: int(r["cnt"])
-                for r in results
-                if r.get("category")
-            }
-        except Exception:
-            return {}
+        results = await self.run_query(
+            f"""
+            MATCH (d:Decision)
+            WHERE d.domain = {self._S('soc')}
+              AND d.category IS NOT NULL
+            RETURN d.category AS category, count(d) AS cnt
+            """
+        )
+        return {
+            r["category"]: int(r["cnt"])
+            for r in results
+            if r.get("category")
+        }
 
     async def compute_outcome_stats(self) -> dict:
         """
@@ -781,31 +783,29 @@ class AGEClient:
         Note: boolean comparison uses = true (not = 'true') — AGE stores booleans
         natively, not as strings.
         """
-        try:
-            results = await self.run_query(
-                """
-                MATCH (d:Decision)
-                RETURN
-                    count(d) AS total,
-                    sum(CASE WHEN d.was_override = true THEN 1 ELSE 0 END)
-                        AS overrides,
-                    avg(CASE WHEN d.was_override = true
-                        THEN d.quality_signal ELSE null END)
-                        AS avg_quality
-                """
-            )
-            if not results:
-                return {"override_rate": 0.0, "override_quality": 0.0}
-            row = results[0]
-            total = int(row.get("total") or 0)
-            overrides = int(row.get("overrides") or 0)
-            avg_q = float(row.get("avg_quality") or 0.0)
-            return {
-                "override_rate": overrides / total if total > 0 else 0.0,
-                "override_quality": avg_q,
-            }
-        except Exception:
+        results = await self.run_query(
+            f"""
+            MATCH (d:Decision)
+            WHERE d.domain = {self._S('soc')}
+            RETURN
+                count(d) AS total,
+                sum(CASE WHEN d.was_override = true THEN 1 ELSE 0 END)
+                    AS overrides,
+                avg(CASE WHEN d.was_override = true
+                    THEN d.quality_signal ELSE null END)
+                    AS avg_quality
+            """
+        )
+        if not results:
             return {"override_rate": 0.0, "override_quality": 0.0}
+        row = results[0]
+        total = int(row.get("total") or 0)
+        overrides = int(row.get("overrides") or 0)
+        avg_q = float(row.get("avg_quality") or 0.0)
+        return {
+            "override_rate": overrides / total if total > 0 else 0.0,
+            "override_quality": avg_q,
+        }
 
     async def compute_iks(self) -> float:
         """

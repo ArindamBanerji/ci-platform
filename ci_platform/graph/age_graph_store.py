@@ -2546,10 +2546,10 @@ class AGEGraphStore:
         domain_clause = ""
         if domain is not None:
             domain_value = self._validated_domain(domain)
-            domain_clause = (
-                "WHERE n.domain IS NULL "
-                f"OR n.domain = {self._S(domain_value)}"
-            )
+            # All production Decision nodes are domain-stamped. NULL-domain
+            # nodes are legacy artifacts and must not cross the domain
+            # boundary during production traversal.
+            domain_clause = f"WHERE n.domain = {self._S(domain_value)}"
         rows = self._run_query(
             f"""
             MATCH p = (e {{entity_id: {self._S(entity_id)}}})-[*1..{hop_count}]-(n)

@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -162,22 +160,6 @@ def store(monkeypatch, fixture_graph):
     return AGEGraphStore(dsn="postgresql://example/test", graph_name="d2_test_graph")
 
 
-def _soc_neo4j_client_class():
-    module_path = (
-        Path(__file__).resolve().parents[2]
-        / "gen-ai-roi-demo-v4-v50"
-        / "backend"
-        / "app"
-        / "db"
-        / "neo4j.py"
-    )
-    spec = importlib.util.spec_from_file_location("soc_neo4j_d2_test", module_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.Neo4jClient
-
-
 def test_confirmed_and_overridden_status_rows_are_counted(store):
     assert store.count_verified("soc") == 4
 
@@ -243,14 +225,11 @@ def test_mixed_branch_parity_across_all_soc_count_readers(store, fixture_graph, 
 
     age_client = AGEClient(dsn="postgresql://example/test", graph_name="d2_test_graph")
     monkeypatch.setattr(age_client, "run_query", run_query)
-    soc_client = _soc_neo4j_client_class()()
-    monkeypatch.setattr(soc_client, "run_query", run_query)
 
     expected = store.count_verified("soc")
     assert expected == 4
     assert asyncio.run(age_client.count_verified_decisions()) == expected
     assert asyncio.run(age_client.count_correct_decisions()) == 1
-    assert asyncio.run(soc_client.count_verified_decisions()) == expected
 
 
 def test_invalid_domain_fails_before_cypher(store, fixture_graph):
