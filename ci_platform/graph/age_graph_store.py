@@ -2179,8 +2179,12 @@ class AGEGraphStore:
             self._run_query(f"CREATE (l:DecisionEntityLink {props}) RETURN l")
 
     def get_decision_links(
-        self, decision_id: str | None = None, domain: str | None = None
+        self,
+        decision_id: str | None = None,
+        domain: str | None = None,
+        limit: int | None = None,
     ) -> List[Dict[str, Any]]:
+        limit_clause = f"LIMIT {max(0, int(limit))}" if limit is not None else ""
         relationship_clauses = []
         if decision_id is not None:
             relationship_clauses.append(f"d.decision_id = {self._S(decision_id)}")
@@ -2199,6 +2203,7 @@ class AGEGraphStore:
                    e.entity_id AS entity_id,
                    type(r) AS edge_type,
                    r.created_at AS created_at
+            {limit_clause}
             """
         )
         link_clauses = []
@@ -2213,13 +2218,17 @@ class AGEGraphStore:
             MATCH (d:Decision {{decision_id: l.decision_id}})
             {where_link}
             RETURN l
+            {limit_clause}
             """
         )
-        return [
+        results = [
             link
             for row in [*relationship_rows, *link_rows]
             if (link := self._link_row_to_dict(row))
         ]
+        if limit is not None:
+            results = results[: max(0, int(limit))]
+        return results
 
     @staticmethod
     def _safe_edge_type(edge_type: str) -> str:

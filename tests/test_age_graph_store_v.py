@@ -50,7 +50,7 @@ class _InMemoryAGE:
 
     def _soc_rows(self, query: str) -> list[_Decision]:
         assert "d.domain = 'soc'" in query
-        return [decision for decision in self.decisions if decision.domain in ("soc", None)]
+        return [decision for decision in self.decisions if decision.domain == "soc"]
 
     @staticmethod
     def _verified(decision: _Decision, query: str) -> bool:
@@ -161,37 +161,42 @@ def store(monkeypatch, fixture_graph):
 
 
 def test_confirmed_and_overridden_status_rows_are_counted(store):
-    assert store.count_verified("soc") == 4
+    assert store.count_verified("soc") == 3
 
 
 def test_legacy_embedded_outcome_row_is_counted(store):
-    assert store.count_verified_decisions("soc") == 4
+    assert store.count_verified_decisions("soc") == 3
 
 
 def test_confirmed_row_with_outcome_is_not_double_counted(store):
-    assert store.count_verified("soc") == 4
+    assert store.count_verified("soc") == 3
 
 
 def test_pending_row_with_outcome_is_excluded(store, fixture_graph):
-    assert store.count_verified("soc") == 4
+    assert store.count_verified("soc") == 3
     assert "SOC-PENDING" in {item.decision_id for item in fixture_graph.decisions}
 
 
 def test_other_domain_row_is_excluded(store):
-    assert store.count_verified("soc") == 4
+    assert store.count_verified("soc") == 3
+
+
+def test_null_domain_row_is_excluded(store, fixture_graph):
+    fixture_graph.decisions.append(_Decision("NULL-DOMAIN", None, "confirmed", None, True, False))
+    assert store.count_verified("soc") == 3
 
 
 def test_archived_confirmed_row_is_excluded_from_d2(store):
-    assert store.count_verified("soc") == 4
-    assert store.count_verified_decisions("soc") == 4
-    assert store.count_correct("soc") == 3
+    assert store.count_verified("soc") == 3
+    assert store.count_verified_decisions("soc") == 3
+    assert store.count_correct("soc") == 2
     assert "SOC-ARCHIVED" not in {
         row["decision_id"] for row in store.get_verified_decisions("soc")
     }
 
 
 def test_count_correct_uses_branch_1_outcome_and_branch_2_property(store):
-    assert store.count_correct("soc") == 3
+    assert store.count_correct("soc") == 2
 
 
 def test_get_verified_decisions_returns_d2_decision_fields(store):
@@ -201,7 +206,6 @@ def test_get_verified_decisions_returns_d2_decision_fields(store):
         "SOC-CONFIRMED",
         "SOC-OVERRIDDEN",
         "SOC-CONFIRMED-OUTCOME",
-        "SOC-LEGACY",
     }
     confirmed = next(row for row in verified if row["decision_id"] == "SOC-CONFIRMED")
     assert confirmed["domain"] == "soc"
@@ -212,9 +216,9 @@ def test_pending_to_outcome_transition_increments_v(store, fixture_graph):
     pending = next(item for item in fixture_graph.decisions if item.decision_id == "SOC-PENDING")
     pending.outcome = None
     pending.correct = False
-    assert store.count_verified("soc") == 4
+    assert store.count_verified("soc") == 3
     store.write_outcome("SOC-PENDING", "approve", True)
-    assert store.count_verified("soc") == 5
+    assert store.count_verified("soc") == 4
 
 
 def test_mixed_branch_parity_across_all_soc_count_readers(store, fixture_graph, monkeypatch):
@@ -227,9 +231,9 @@ def test_mixed_branch_parity_across_all_soc_count_readers(store, fixture_graph, 
     monkeypatch.setattr(age_client, "run_query", run_query)
 
     expected = store.count_verified("soc")
-    assert expected == 4
+    assert expected == 3
     assert asyncio.run(age_client.count_verified_decisions()) == expected
-    assert asyncio.run(age_client.count_correct_decisions()) == 1
+    assert asyncio.run(age_client.count_correct_decisions()) == 0
 
 
 def test_invalid_domain_fails_before_cypher(store, fixture_graph):
@@ -242,6 +246,19 @@ def test_protocol_v2_test_domain_is_accepted(store):
     domain = "pytest_protocol_v2_test_age_write_outcome_confirmed_b6bc3333"
 
     assert store._validated_domain(domain) == domain
+
+
+def test_get_decision_links_limit_is_global():
+    from ci_platform.graph.age_graph_store import AGEGraphStore
+
+    store = object.__new__(AGEGraphStore)
+    rows = [
+        {"decision_id": f"D-{index}", "entity_id": f"E-{index}", "edge_type": "DECIDED_ON"}
+        for index in range(8)
+    ]
+    calls = iter((rows, rows))
+    store._run_query = lambda query: next(calls)
+    assert len(store.get_decision_links(limit=5)) <= 5
 
 
 def test_sqlite_d2_lifecycle_parity_in_memory():
@@ -284,7 +301,7 @@ def test_live_soc_gate():
         rows = asyncio.run(
             client.run_query(
                 "MATCH (d:Decision) "
-                "WHERE (d.domain = 'soc' OR d.domain IS NULL) "
+                "WHERE d.domain = 'soc' "
                 "AND (d.archived IS NULL OR d.archived <> true) "
                 "AND ("
                 "(d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden']) "
@@ -325,4 +342,5 @@ def test_trading_gate_after_phase_3():
         assert count >= 150
     finally:
         asyncio.run(client.close())
+
 
