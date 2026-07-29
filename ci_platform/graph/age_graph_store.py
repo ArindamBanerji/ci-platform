@@ -583,19 +583,128 @@ class AGEGraphStore:
         )
         if not entity_id:
             self._run_query(f"CREATE (d:Decision {props}) RETURN d")
-            return decision_id
+        else:
+            entity_query = f"""
+            MATCH (e {{entity_id: {self._S(entity_id)}}})
+            WITH e LIMIT 1
+            CREATE (d:Decision {props})
+            CREATE (d)-[:DECIDED_ON]->(e)
+            RETURN d
+            """
+            rows = self._run_query(entity_query)
+            if not rows:
+                self._run_query(f"CREATE (d:Decision {props}) RETURN d")
 
-        entity_query = f"""
-        MATCH (e {{entity_id: {self._S(entity_id)}}})
-        WITH e LIMIT 1
-        CREATE (d:Decision {props})
-        CREATE (d)-[:DECIDED_ON]->(e)
-        RETURN d
-        """
-        rows = self._run_query(entity_query)
-        if not rows:
-            self._run_query(f"CREATE (d:Decision {props}) RETURN d")
+        # The domain property remains the partitioning authority during the
+        # topology transition.  The canonical edge is additive and idempotent.
+        try:
+            self._link_decision_to_domain(decision_id=decision_id, domain=domain)
+        except Exception as exc:
+            log.warning(
+                "Decision IN_DOMAIN edge creation failed: decision=%s domain=%s error=%s: %s",
+                decision_id,
+                domain,
+                type(exc).__name__,
+                exc,
+            )
+
+        try:
+            factor_names, factor_values = self._factor_vector_from_factors(factors)
+            if factor_names and factor_values:
+                self._create_factor_vector_node(
+                    decision_id=decision_id,
+                    domain=domain,
+                    factor_names=factor_names,
+                    factor_values=factor_values,
+                )
+        except Exception as exc:
+            log.warning(
+                "FactorVector persistence failed: decision=%s domain=%s error=%s: %s",
+                decision_id,
+                domain,
+                type(exc).__name__,
+                exc,
+            )
         return decision_id
+
+    @staticmethod
+    def _factor_vector_from_factors(
+        factors: Mapping[str, Any],
+    ) -> tuple[list[str], list[float]]:
+        """Convert the legacy factors mapping into the canonical vector shape."""
+        if not factors:
+            return [], []
+        if isinstance(factors.get("factor_names"), list):
+            names = [str(value) for value in factors["factor_names"]]
+            raw_values = factors.get("factor_values", factors.get("factor_vector"))
+            if isinstance(raw_values, (list, tuple)):
+                return names, [float(value) for value in raw_values]
+        scalar_items = [
+            (str(name), value)
+            for name, value in factors.items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        return [name for name, _ in scalar_items], [float(value) for _, value in scalar_items]
+
+    def _link_decision_to_domain(self, *, decision_id: str, domain: str) -> None:
+        domain_value = self._validated_domain(domain)
+        self._ensure_domain_anchor(domain_value)
+        self._run_query(
+            f"""
+            MATCH (d:Decision {{decision_id: {self._S(str(decision_id))}}})
+            MATCH (domain:Domain {{domain_id: {self._S(domain_value)}}})
+            WHERE d.domain = {self._S(domain_value)}
+            OPTIONAL MATCH (d)-[existing:IN_DOMAIN]->(domain)
+            WITH d, domain, count(existing) AS existing_count
+            WHERE existing_count = 0
+            CREATE (d)-[:IN_DOMAIN]->(domain)
+            RETURN d
+            """
+        )
+
+    def _create_factor_vector_node(
+        self,
+        *,
+        decision_id: str,
+        domain: str,
+        factor_names: list[str],
+        factor_values: list[float],
+    ) -> None:
+        domain_value = self._validated_domain(domain)
+        vector_id = f"{decision_id}:fv"
+        factor_names_json = json.dumps(factor_names, sort_keys=True)
+        factor_values_json = json.dumps(factor_values, sort_keys=True)
+        factor_names_hash = hashlib.sha256(factor_names_json.encode("utf-8")).hexdigest()
+        shape_json = json.dumps([len(factor_values)])
+        created_at = datetime.now(timezone.utc).isoformat()
+        props = (
+            "{"
+            f"vector_id: {self._S(vector_id)}, "
+            f"decision_id: {self._S(str(decision_id))}, "
+            f"domain: {self._S(domain_value)}, "
+            f"dimension: {len(factor_values)}, "
+            f"factor_names: {self._S(factor_names_json)}, "
+            f"factor_values: {self._S(factor_values_json)}, "
+            f"factor_names_hash: {self._S(factor_names_hash)}, "
+            f"shape: {self._S(shape_json)}, "
+            f"created_at: {self._S(created_at)}, "
+            "schema_version: 'protocol_v2'"
+            "}"
+        )
+        self._run_query(f"CREATE (f:FactorVector {props}) RETURN f")
+        self._run_query(
+            f"""
+            MATCH (d:Decision {{decision_id: {self._S(str(decision_id))}}})
+            MATCH (f:FactorVector {{vector_id: {self._S(vector_id)}}})
+            WHERE d.domain = {self._S(domain_value)}
+              AND f.domain = {self._S(domain_value)}
+            OPTIONAL MATCH (d)-[existing:HAS_FACTOR_VECTOR]->(f)
+            WITH d, f, count(existing) AS existing_count
+            WHERE existing_count = 0
+            CREATE (d)-[:HAS_FACTOR_VECTOR]->(f)
+            RETURN f
+            """
+        )
 
     def write_governed_decision(
         self,
@@ -916,6 +1025,81 @@ class AGEGraphStore:
         """
         self._run_query(query)
 
+    def _ensure_domain_anchor(self, domain: str) -> None:
+        domain = str(domain)
+        rows = self._run_query(
+            f"""
+            MATCH (d:Domain {{domain_id: {self._S(domain)}}})
+            RETURN d
+            LIMIT 1
+            """
+        )
+        if rows:
+            return
+        self._run_query(
+            f"""
+            CREATE (d:Domain {{
+                domain_id: {self._S(domain)},
+                domain: {self._S(domain)},
+                name: {self._S(domain)},
+                copilot: {self._S(domain)},
+                schema_version: 'protocol_v2',
+                created_at: {self._S(datetime.now(timezone.utc).isoformat())}
+            }})
+            RETURN d
+            """
+        )
+
+    def _link_domain_summary(
+        self,
+        *,
+        label: str,
+        identifier: str,
+        identifier_key: str,
+        domain: str,
+    ) -> None:
+        domain = str(domain)
+        self._ensure_domain_anchor(domain)
+        self._run_query(
+            f"""
+            MATCH (n:{label} {{{identifier_key}: {self._S(str(identifier))}}})
+            MATCH (d:Domain {{domain_id: {self._S(domain)}}})
+            WHERE n.domain = {self._S(domain)}
+            OPTIONAL MATCH (n)-[existing:SUMMARIZES_DOMAIN]->(d)
+            WITH n, d, count(existing) AS existing_count
+            WHERE existing_count = 0
+            CREATE (n)-[:SUMMARIZES_DOMAIN]->(d)
+            RETURN d
+            """
+        )
+
+    def _link_checkpoint_edges(
+        self,
+        *,
+        decision_id: str,
+        checkpoint_id: str,
+        domain: str,
+    ) -> None:
+        domain = str(domain)
+        self._run_query(
+            f"""
+            MATCH (d:Decision {{decision_id: {self._S(str(decision_id))}}})
+            MATCH (c:CentroidCheckpoint {{checkpoint_id: {self._S(str(checkpoint_id))}}})
+            WHERE d.domain = {self._S(domain)}
+              AND c.domain = {self._S(domain)}
+            OPTIONAL MATCH (d)-[snapshot:SNAPSHOT_AFTER]->(c)
+            WITH d, c, count(snapshot) AS snapshot_count
+            WHERE snapshot_count = 0
+            CREATE (d)-[:SNAPSHOT_AFTER]->(c)
+            WITH d, c
+            OPTIONAL MATCH (c)-[derived:DERIVED_FROM]->(d)
+            WITH d, c, count(derived) AS derived_count
+            WHERE derived_count = 0
+            CREATE (c)-[:DERIVED_FROM]->(d)
+            RETURN c
+            """
+        )
+
     def write_conservation_status(
         self,
         status_id: str,
@@ -946,6 +1130,12 @@ class AGEGraphStore:
         existing = self._get_conservation_status_payload(str(status_id))
         if existing is not None:
             if existing == payload:
+                self._link_domain_summary(
+                    label="ConservationStatus",
+                    identifier=str(status_id),
+                    identifier_key="status_id",
+                    domain=str(domain),
+                )
                 return
             raise ValueError(f"conflicting conservation status_id: {status_id}")
 
@@ -968,6 +1158,12 @@ class AGEGraphStore:
             "}"
         )
         self._run_query(f"CREATE (c:ConservationStatus {props}) RETURN c")
+        self._link_domain_summary(
+            label="ConservationStatus",
+            identifier=str(status_id),
+            identifier_key="status_id",
+            domain=str(domain),
+        )
 
     def _get_conservation_status_payload(self, status_id: str) -> Optional[Dict[str, Any]]:
         rows = self._run_query(
@@ -1017,6 +1213,12 @@ class AGEGraphStore:
         existing = self._get_fingerprint_payload(str(fingerprint_id))
         if existing is not None:
             if existing == payload:
+                self._link_domain_summary(
+                    label="Fingerprint",
+                    identifier=str(fingerprint_id),
+                    identifier_key="fingerprint_id",
+                    domain=str(domain),
+                )
                 return
             raise ValueError(f"conflicting fingerprint_id: {fingerprint_id}")
 
@@ -1035,6 +1237,12 @@ class AGEGraphStore:
             "}"
         )
         self._run_query(f"CREATE (f:Fingerprint {props}) RETURN f")
+        self._link_domain_summary(
+            label="Fingerprint",
+            identifier=str(fingerprint_id),
+            identifier_key="fingerprint_id",
+            domain=str(domain),
+        )
 
     def _get_fingerprint_payload(self, fingerprint_id: str) -> Optional[Dict[str, Any]]:
         rows = self._run_query(
@@ -1073,9 +1281,12 @@ class AGEGraphStore:
         shape: List[int],
         factor_names_hash: str,
         metadata: Optional[Dict[str, Any]] = None,
+        decision_id: Optional[str] = None,
     ) -> None:
         if hasattr(centroids, "tolist"):
             centroids = centroids.tolist()
+        metadata = dict(metadata or {})
+        decision_id = str(decision_id or metadata.get("decision_id") or "") or None
         payload = {
             "checkpoint_id": str(checkpoint_id),
             "domain": str(domain),
@@ -1087,11 +1298,17 @@ class AGEGraphStore:
             "iks": float(iks),
             "shape_json": json.dumps([int(value) for value in shape], sort_keys=True),
             "factor_names_hash": str(factor_names_hash),
-            "metadata_json": json.dumps(dict(metadata or {}), sort_keys=True),
+            "metadata_json": json.dumps(metadata, sort_keys=True),
         }
         existing = self._get_centroid_checkpoint_payload(str(checkpoint_id))
         if existing is not None:
             if existing == payload:
+                if decision_id:
+                    self._link_checkpoint_edges(
+                        decision_id=decision_id,
+                        checkpoint_id=str(checkpoint_id),
+                        domain=str(domain),
+                    )
                 return
             raise ValueError(f"conflicting checkpoint_id: {checkpoint_id}")
 
@@ -1114,6 +1331,12 @@ class AGEGraphStore:
             "}"
         )
         self._run_query(f"CREATE (c:CentroidCheckpoint {props}) RETURN c")
+        if decision_id:
+            self._link_checkpoint_edges(
+                decision_id=decision_id,
+                checkpoint_id=str(checkpoint_id),
+                domain=str(domain),
+            )
 
     def _get_centroid_checkpoint_payload(self, checkpoint_id: str) -> Optional[Dict[str, Any]]:
         rows = self._run_query(
@@ -2453,6 +2676,7 @@ class AGEGraphStore:
                 "ConservationStatus",
                 "Fingerprint",
                 "CentroidCheckpoint",
+                "Domain",
                 "L5Centroid",
                 "L5DKWeight",
                 "L5DKWeightArchive",
@@ -2518,6 +2742,38 @@ class AGEGraphStore:
             MATCH (d:Decision)-[r:ABOUT]->(e:DomainContext)
             WHERE d.domain = {self._S(domain)}
               AND e.domain = {self._S(domain)}
+            DELETE r
+            """
+        )
+        tx.run_cypher(
+            f"""
+            MATCH (n)-[r:SUMMARIZES_DOMAIN]->(d:Domain)
+            WHERE n.domain = {self._S(domain)}
+               OR d.domain = {self._S(domain)}
+            DELETE r
+            """
+        )
+        tx.run_cypher(
+            f"""
+            MATCH (d:Decision)-[r:SNAPSHOT_AFTER]->(c:CentroidCheckpoint)
+            WHERE d.domain = {self._S(domain)}
+               OR c.domain = {self._S(domain)}
+            DELETE r
+            """
+        )
+        tx.run_cypher(
+            f"""
+            MATCH (c:CentroidCheckpoint)-[r:DERIVED_FROM]->(d:Decision)
+            WHERE c.domain = {self._S(domain)}
+               OR d.domain = {self._S(domain)}
+            DELETE r
+            """
+        )
+        tx.run_cypher(
+            f"""
+            MATCH (d:Decision)-[r:HAS_CENTROID_CHECKPOINT]->(c:CentroidCheckpoint)
+            WHERE d.domain = {self._S(domain)}
+               OR c.domain = {self._S(domain)}
             DELETE r
             """
         )

@@ -364,10 +364,10 @@ def test_write_decision_then_outcome_lifecycle_matches_pending_guard(fake_age_cl
     store.write_outcome(decision_id, "order_as_planned", True)
 
     queries = [query for query, _ in FakeAGEClient.instances[0].queries]
-    assert "status: 'pending'" in queries[0]
-    assert "AND d.status = 'pending'" in queries[1]
-    assert "SET d.status = 'confirmed'" in queries[1]
-    assert "CREATE (o:Outcome" in queries[1]
+    assert any("status: 'pending'" in query for query in queries)
+    outcome_query = next(query for query in queries if "AND d.status = 'pending'" in query)
+    assert "SET d.status = 'confirmed'" in outcome_query
+    assert "CREATE (o:Outcome" in outcome_query
 
 
 def test_write_outcome_still_rejects_non_pending_or_missing_status(fake_age_client):
@@ -450,10 +450,9 @@ def test_write_decision_no_entity_falls_back_to_standalone(fake_age_client):
     )
 
     queries = [query for query, _ in FakeAGEClient.instances[0].queries]
-    assert len(queries) == 1
-    assert "MATCH (e {entity_id:" not in queries[0]
-    assert "CREATE (d:Decision" in queries[0]
-    assert "DECIDED_ON" not in queries[0]
+    decision_query = next(query for query in queries if "CREATE (d:Decision" in query)
+    assert "MATCH (e {entity_id:" not in decision_query
+    assert "DECIDED_ON" not in decision_query
 
 
 def test_write_decision_with_entity_creates_edge_in_same_query(fake_age_client):
@@ -470,9 +469,8 @@ def test_write_decision_with_entity_creates_edge_in_same_query(fake_age_client):
     )
 
     queries = [query for query, _ in FakeAGEClient.instances[0].queries]
-    assert len(queries) == 1
-    assert "CREATE (d:Decision" in queries[0]
-    assert "CREATE (d)-[:DECIDED_ON]->(e)" in queries[0]
+    decision_query = next(query for query in queries if "CREATE (d:Decision" in query)
+    assert "CREATE (d)-[:DECIDED_ON]->(e)" in decision_query
 
 
 def test_get_verified_decisions_merges_outcome(fake_age_client):
