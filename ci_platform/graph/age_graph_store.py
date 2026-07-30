@@ -1100,6 +1100,52 @@ class AGEGraphStore:
             """
         )
 
+    def _link_transfer_edges(
+        self,
+        *,
+        pattern_id: str,
+        source_domain: str,
+        target_domain: str,
+        evolution_event_id: Optional[str] = None,
+    ) -> None:
+        self._ensure_domain_anchor(source_domain)
+        self._ensure_domain_anchor(target_domain)
+        self._run_query(
+            f"""
+            MATCH (tp:TransferPattern {{pattern_id: {self._S(str(pattern_id))}}})
+            MATCH (d:Domain {{domain_id: {self._S(str(source_domain))}}})
+            OPTIONAL MATCH (tp)-[existing:FROM_DOMAIN]->(d)
+            WITH tp, d, count(existing) AS existing_count
+            WHERE existing_count = 0
+            CREATE (tp)-[:FROM_DOMAIN]->(d)
+            RETURN tp
+            """
+        )
+        self._run_query(
+            f"""
+            MATCH (tp:TransferPattern {{pattern_id: {self._S(str(pattern_id))}}})
+            MATCH (d:Domain {{domain_id: {self._S(str(target_domain))}}})
+            OPTIONAL MATCH (tp)-[existing:TO_DOMAIN]->(d)
+            WITH tp, d, count(existing) AS existing_count
+            WHERE existing_count = 0
+            CREATE (tp)-[:TO_DOMAIN]->(d)
+            RETURN tp
+            """
+        )
+        if evolution_event_id is not None:
+            self._run_query(
+                f"""
+                MATCH (tp:TransferPattern {{pattern_id: {self._S(str(pattern_id))}}})
+                MATCH (e:EvolutionEvent {{event_id: {self._S(str(evolution_event_id))}}})
+                WHERE e.domain = {self._S(str(target_domain))}
+                OPTIONAL MATCH (tp)-[existing:DERIVED_FROM]->(e)
+                WITH tp, e, count(existing) AS existing_count
+                WHERE existing_count = 0
+                CREATE (tp)-[:DERIVED_FROM]->(e)
+                RETURN tp
+                """
+            )
+
     def write_conservation_status(
         self,
         status_id: str,
@@ -1643,6 +1689,211 @@ class AGEGraphStore:
         )
         self._run_query(f"CREATE (e:EvolutionEvent {props}) RETURN e")
 
+    def write_transfer_pattern(
+        self,
+        pattern_id: str,
+        source_domain: str,
+        target_domain: str,
+        pattern_type: str,
+        factor_mapping: Dict[str, Any],
+        confidence: float,
+        validation_status: str,
+        conservation_status: str,
+        source_rule: Optional[str] = None,
+        target_rule: Optional[str] = None,
+        source_fingerprint_id: Optional[str] = None,
+        evolution_event_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        payload = {
+            "pattern_id": str(pattern_id),
+            "source_domain": str(source_domain),
+            "target_domain": str(target_domain),
+            "pattern_type": str(pattern_type),
+            "source_rule": None if source_rule is None else str(source_rule),
+            "target_rule": None if target_rule is None else str(target_rule),
+            "factor_mapping_json": json.dumps(dict(factor_mapping), sort_keys=True),
+            "confidence": float(confidence),
+            "validation_status": str(validation_status),
+            "conservation_status": str(conservation_status),
+            "source_fingerprint_id": (
+                None if source_fingerprint_id is None else str(source_fingerprint_id)
+            ),
+            "evolution_event_id": None if evolution_event_id is None else str(evolution_event_id),
+            "metadata_json": json.dumps(dict(metadata or {}), sort_keys=True),
+        }
+        rows = self._run_query(
+            f"""
+            MATCH (tp:TransferPattern {{pattern_id: {self._S(payload['pattern_id'])}}})
+            RETURN tp
+            LIMIT 1
+            """
+        )
+        if rows:
+            node = self._node_to_dict(rows[0].get("tp", rows[0]))
+            existing = {
+                "pattern_id": str(node.get("pattern_id")),
+                "source_domain": str(node.get("source_domain")),
+                "target_domain": str(node.get("target_domain")),
+                "pattern_type": str(node.get("pattern_type")),
+                "source_rule": node.get("source_rule"),
+                "target_rule": node.get("target_rule"),
+                "factor_mapping_json": json.dumps(
+                    self._json_field_value(node.get("factor_mapping")), sort_keys=True
+                ),
+                "confidence": self._as_float(node.get("confidence")),
+                "validation_status": str(node.get("validation_status")),
+                "conservation_status": str(node.get("conservation_status")),
+                "source_fingerprint_id": node.get("source_fingerprint_id"),
+                "evolution_event_id": node.get("evolution_event_id"),
+                "metadata_json": json.dumps(
+                    self._json_field_value(node.get("metadata")) or {}, sort_keys=True
+                ),
+            }
+            if existing != payload:
+                raise ValueError(f"conflicting transfer pattern_id: {pattern_id}")
+            self._link_transfer_edges(
+                pattern_id=pattern_id,
+                source_domain=source_domain,
+                target_domain=target_domain,
+                evolution_event_id=evolution_event_id,
+            )
+            return None
+
+        created_at = datetime.now(timezone.utc).timestamp()
+        props = (
+            "{"
+            f"pattern_id: {self._S(payload['pattern_id'])}, "
+            f"source_domain: {self._S(payload['source_domain'])}, "
+            f"target_domain: {self._S(payload['target_domain'])}, "
+            f"pattern_type: {self._S(payload['pattern_type'])}, "
+            f"source_rule: {self._S(payload['source_rule'])}, "
+            f"target_rule: {self._S(payload['target_rule'])}, "
+            f"factor_mapping: {self._S(payload['factor_mapping_json'])}, "
+            f"confidence: {payload['confidence']}, "
+            f"validation_status: {self._S(payload['validation_status'])}, "
+            f"conservation_status: {self._S(payload['conservation_status'])}, "
+            f"source_fingerprint_id: {self._S(payload['source_fingerprint_id'])}, "
+            f"evolution_event_id: {self._S(payload['evolution_event_id'])}, "
+            f"metadata: {self._S(payload['metadata_json'])}, "
+            "schema_version: 'protocol_v2', "
+            f"created_at: {float(created_at)}"
+            "}"
+        )
+        self._run_query(f"CREATE (tp:TransferPattern {props}) RETURN tp")
+        self._link_transfer_edges(
+            pattern_id=pattern_id,
+            source_domain=source_domain,
+            target_domain=target_domain,
+            evolution_event_id=evolution_event_id,
+        )
+
+    def get_transfer_patterns(
+        self,
+        source_domain: Optional[str] = None,
+        target_domain: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        source_clause = ""
+        target_clause = ""
+        if source_domain is not None:
+            source_clause = f"AND src.domain_id = {self._S(str(source_domain))}"
+        if target_domain is not None:
+            target_clause = f"AND dst.domain_id = {self._S(str(target_domain))}"
+        rows = self._run_query(
+            f"""
+            MATCH (tp:TransferPattern)-[:FROM_DOMAIN]->(src:Domain)
+            MATCH (tp)-[:TO_DOMAIN]->(dst:Domain)
+            WHERE true {source_clause} {target_clause}
+            RETURN tp, src, dst
+            ORDER BY tp.created_at ASC, tp.pattern_id ASC
+            """
+        )
+        patterns: List[Dict[str, Any]] = []
+        for row in rows:
+            node = self._node_to_dict(row.get("tp", row))
+            node["source_domain"] = self._node_to_dict(row.get("src", {})).get(
+                "domain_id", node.get("source_domain")
+            )
+            node["target_domain"] = self._node_to_dict(row.get("dst", {})).get(
+                "domain_id", node.get("target_domain")
+            )
+            patterns.append(node)
+        return patterns
+
+    def get_latest_conservation_statuses(
+        self,
+        domains: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        domain_clause = ""
+        if domains is not None:
+            if not domains:
+                return []
+            domain_clause = "AND d.domain_id IN (" + ", ".join(
+                self._S(str(domain)) for domain in domains
+            ) + ")"
+        rows = self._run_query(
+            f"""
+            MATCH (cs:ConservationStatus)-[:SUMMARIZES_DOMAIN]->(d:Domain)
+            WHERE cs.domain = d.domain_id {domain_clause}
+            WITH d, cs
+            ORDER BY cs.computed_at DESC, cs.status_id DESC
+            WITH d, collect(cs)[0] AS latest
+            RETURN latest
+            ORDER BY d.domain_id ASC
+            """
+        )
+        return [self._node_to_dict(row.get("latest", row)) for row in rows]
+
+    def get_iks_trajectory(
+        self,
+        domains: Optional[List[str]] = None,
+        start: Optional[float] = None,
+        end: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        clauses = ["c.iks IS NOT NULL"]
+        if domains is not None:
+            if not domains:
+                return []
+            clauses.append(
+                "c.domain IN (" + ", ".join(self._S(str(domain)) for domain in domains) + ")"
+            )
+        if start is not None:
+            clauses.append(f"c.created_at >= {float(start)}")
+        if end is not None:
+            clauses.append(f"c.created_at <= {float(end)}")
+        rows = self._run_query(
+            f"""
+            MATCH (c:CentroidCheckpoint)
+            WHERE {' AND '.join(clauses)}
+            RETURN c
+            ORDER BY c.domain ASC, c.created_at ASC, c.checkpoint_id ASC
+            """
+        )
+        selected: Dict[tuple[str, str], Dict[str, Any]] = {}
+        for row in rows:
+            checkpoint = self._node_to_dict(row.get("c", row))
+            metadata = self._json_field_value(checkpoint.get("metadata")) or {}
+            decision_id = metadata.get("decision_id") or checkpoint.get("decision_id")
+            key = (str(checkpoint.get("domain")), str(decision_id)) if decision_id else (
+                str(checkpoint.get("domain")),
+                f"row:{checkpoint.get('created_at')}:{checkpoint.get('checkpoint_id', '')}",
+            )
+            checkpoint["decision_id"] = decision_id
+            current = selected.get(key)
+            if current is None or (
+                checkpoint.get("checkpoint_id") is not None
+                and current.get("checkpoint_id") is None
+            ):
+                selected[key] = checkpoint
+        return sorted(
+            selected.values(),
+            key=lambda item: (
+                str(item.get("domain")),
+                float(item.get("created_at", 0.0)),
+                str(item.get("checkpoint_id") or ""),
+            ),
+        )
+
     def _get_evolution_event_payload(self, event_id: str) -> Optional[Dict[str, Any]]:
         rows = self._run_query(
             f"""
@@ -1883,13 +2134,20 @@ class AGEGraphStore:
 
     def count_categories_with_n(self, domain: str, n: int = 1) -> int:
         threshold = max(int(n), 0)
+        domain_clause = self._domain_clause(domain)
         rows = self._run_query(
             f"""
-            MATCH (d:Decision)-[:HAS_OUTCOME]->(o:Outcome)
-            WHERE d.domain = {self._S(domain)}
-            WITH d.category AS category, count(o) AS outcome_count
-            WHERE outcome_count >= {threshold}
-            RETURN count(category) AS cnt
+            MATCH (d:Decision)
+            WHERE {domain_clause}
+              AND (d.archived IS NULL OR d.archived <> true)
+              AND (
+                  (d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden'])
+                  OR
+                  (d.status IS NULL AND d.outcome IS NOT NULL)
+              )
+            WITH d.category AS cat, count(d) AS cnt
+            WHERE cnt >= {threshold}
+            RETURN count(cat) AS cnt
             """
         )
         return self._int_from_rows(rows, "cnt")
@@ -1971,9 +2229,15 @@ class AGEGraphStore:
         centroids: List[Dict[str, object]] = []
         for row in sorted(latest_by_identity.values(), key=lambda item: (str(item.get("category")), str(item.get("action")))):
             vector_json = row.get("vector_json")
-            if not isinstance(vector_json, str):
-                raise TypeError("L5Centroid vector_json must be a JSON string")
-            vector = [float(value) for value in json.loads(vector_json)]
+            if isinstance(vector_json, str):
+                vector_values = json.loads(vector_json)
+            elif isinstance(vector_json, (list, tuple)):
+                # AGE may deserialize the JSON text property to an agtype
+                # list before it reaches the Python client.
+                vector_values = vector_json
+            else:
+                raise TypeError("L5Centroid vector_json must be JSON text or a list")
+            vector = [float(value) for value in vector_values]
             centroids.append(
                 {
                     "category": row.get("category"),
@@ -2498,14 +2762,19 @@ class AGEGraphStore:
             "created_at": link.get("created_at") or row.get("created_at"),
         }
 
-    def get_centroid_checkpoints(self, domain: str, **kwargs: Any) -> List[Dict[str, Any]]:
+    def get_centroid_checkpoints(
+        self,
+        domain: str,
+        include_v2: bool = False,
+        **kwargs: Any,
+    ) -> List[Dict[str, Any]]:
         limit = kwargs.pop("limit", 50)
         limit_value = self._safe_limit(limit, default=50)
         rows = self._run_query(
             f"""
             MATCH (c:CentroidCheckpoint)
             WHERE c.domain = {self._S(domain)}
-              AND c.checkpoint_id IS NULL
+              AND ({"TRUE" if include_v2 else "c.checkpoint_id IS NULL"})
             RETURN c
             ORDER BY c.created_at DESC
             LIMIT {limit_value}
@@ -2682,6 +2951,7 @@ class AGEGraphStore:
                 "L5DKWeightArchive",
                 "L5ConservationState",
                 "EvolutionEvent",
+                "TransferPattern",
             ):
                 self._delete_domain_label(tx, label, domain)
 
@@ -2856,7 +3126,15 @@ class AGEGraphStore:
                 node = self._node_to_dict(next(iter(value.values())))
             else:
                 node = dict(value)
-            for key in ("factors", "metadata", "centroids", "factor_vector", "factor_names", "probabilities"):
+            for key in (
+                "factors",
+                "metadata",
+                "centroids",
+                "factor_vector",
+                "factor_names",
+                "factor_mapping",
+                "probabilities",
+            ):
                 if isinstance(node.get(key), str):
                     try:
                         node[key] = json.loads(node[key])

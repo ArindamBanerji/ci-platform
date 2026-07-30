@@ -519,10 +519,12 @@ def test_count_categories_with_n_queries_domain_threshold_and_returns_int(fake_a
 
     query, parameters = FakeAGEClient.instances[0].queries[0]
     assert parameters is None
-    assert "MATCH (d:Decision)-[:HAS_OUTCOME]->(o:Outcome)" in query
+    assert "MATCH (d:Decision)" in query
+    assert "d.status IN ['confirmed', 'overridden']" in query
+    assert "AS cat" in query
+    assert "AS cnt" in query
     assert "d.domain = 'soc'" in query
-    assert "outcome_count >= 3" in query
-    assert "RETURN count(category) AS cnt" in query
+    assert "RETURN count(cat) AS cnt" in query
     assert "MERGE" not in query
     assert "$" not in query
 
@@ -1659,6 +1661,24 @@ def test_get_centroids_reads_l5_centroids_and_decodes_vector(fake_age_client):
             "updated_at": 123.4,
         }
     ]
+
+
+def test_get_centroids_accepts_age_decoded_vector(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.append(
+        [
+            {
+                "category": "alpha",
+                "action": "approve",
+                "vector_json": [1.0, 2.5],
+                "delta_norm": 0.3,
+                "caused_by_decision_id": "DEC-1",
+                "updated_at_epoch": 123.4,
+            }
+        ]
+    )
+
+    assert store.get_centroids("soc")[0]["vector_json"] == [1.0, 2.5]
 
 
 def test_age_centroid_duplicate_returns_latest(fake_age_client):

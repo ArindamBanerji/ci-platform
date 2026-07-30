@@ -420,8 +420,75 @@ class AGEGraphStoreAdapter:
     def load_latest_centroids(self, domain: str) -> Any | None:
         return self._store.load_latest_centroids(domain)
 
-    def get_centroid_checkpoints(self, domain: str, **kwargs: Any) -> list[dict[str, Any]]:
+    def get_centroid_checkpoints(
+        self,
+        domain: str,
+        include_v2: bool = False,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        if include_v2:
+            return self._store.get_centroid_checkpoints(
+                domain,
+                include_v2=True,
+                **kwargs,
+            )
         return self._store.get_centroid_checkpoints(domain, **kwargs)
+
+    def write_transfer_pattern(
+        self,
+        pattern_id: str,
+        source_domain: str,
+        target_domain: str,
+        pattern_type: str,
+        factor_mapping: dict[str, Any],
+        confidence: float,
+        validation_status: str,
+        conservation_status: str,
+        source_rule: str | None = None,
+        target_rule: str | None = None,
+        source_fingerprint_id: str | None = None,
+        evolution_event_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._store.write_transfer_pattern(
+            pattern_id=pattern_id,
+            source_domain=source_domain,
+            target_domain=target_domain,
+            pattern_type=pattern_type,
+            factor_mapping=factor_mapping,
+            confidence=confidence,
+            validation_status=validation_status,
+            conservation_status=conservation_status,
+            source_rule=source_rule,
+            target_rule=target_rule,
+            source_fingerprint_id=source_fingerprint_id,
+            evolution_event_id=evolution_event_id,
+            metadata=metadata,
+        )
+
+    def get_transfer_patterns(
+        self,
+        source_domain: str | None = None,
+        target_domain: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._store.get_transfer_patterns(
+            source_domain=source_domain,
+            target_domain=target_domain,
+        )
+
+    def get_latest_conservation_statuses(
+        self,
+        domains: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._store.get_latest_conservation_statuses(domains=domains)
+
+    def get_iks_trajectory(
+        self,
+        domains: list[str] | None = None,
+        start: float | None = None,
+        end: float | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._store.get_iks_trajectory(domains=domains, start=start, end=end)
 
     def save_evolution_event(
         self,
