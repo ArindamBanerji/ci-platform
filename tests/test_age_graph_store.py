@@ -279,8 +279,8 @@ def test_query_limits_are_sanitized(fake_age_client):
     store = _new_store(fake_age_client)
 
     store.get_decisions("soc", limit=-1)
-    store.query_context("ENT-1", hops=99)
-    store.query_similar("DEC-1", limit=0)
+    store.query_context("ENT-1", hops=99, domain="soc")
+    store.query_similar("DEC-1", limit=0, domain="soc")
 
     queries = "\n".join(query for query, _ in FakeAGEClient.instances[0].queries)
     assert "LIMIT -1" not in queries
@@ -361,7 +361,7 @@ def test_write_decision_then_outcome_lifecycle_matches_pending_guard(fake_age_cl
     )
     FakeAGEClient.instances[0].responses.append([{"status": "confirmed", "o": {}}])
 
-    store.write_outcome(decision_id, "order_as_planned", True)
+    store.write_outcome(decision_id, "order_as_planned", True, domain="purchasing")
 
     queries = [query for query, _ in FakeAGEClient.instances[0].queries]
     assert any("status: 'pending'" in query for query in queries)
@@ -382,7 +382,7 @@ def test_write_outcome_still_rejects_non_pending_or_missing_status(fake_age_clie
     )
 
     with pytest.raises(ValueError, match="decision status is not pending"):
-        store.write_outcome("DEC-null-status", "hold_for_review", True)
+        store.write_outcome("DEC-null-status", "hold_for_review", True, domain="soc")
 
     queries = [query for query, _ in FakeAGEClient.instances[0].queries]
     assert "AND d.status = 'pending'" in queries[0]
@@ -1857,7 +1857,7 @@ def test_link_decision_to_entity_creates_relationship_when_entity_exists(fake_ag
     store = _new_store(fake_age_client)
     FakeAGEClient.instances[0].responses.append([{"d": {"decision_id": "DEC-1"}}])
 
-    store.link_decision_to_entity("DEC-1", "ENT-1")
+    store.link_decision_to_entity("DEC-1", "ENT-1", domain="soc")
 
     queries = [query for query, _ in FakeAGEClient.instances[0].queries]
     assert len(queries) == 1
@@ -1872,7 +1872,9 @@ def test_link_decision_to_entity_creates_relationship_when_entity_exists(fake_ag
 def test_link_decision_to_entity_falls_back_to_link_node(fake_age_client):
     store = _new_store(fake_age_client)
 
-    store.link_decision_to_entity("DEC-1", "ENT-1", edge_type="REVIEWS")
+    store.link_decision_to_entity(
+        "DEC-1", "ENT-1", edge_type="REVIEWS", domain="soc"
+    )
 
     queries = [query for query, _ in FakeAGEClient.instances[0].queries]
     assert len(queries) == 2
@@ -1887,7 +1889,9 @@ def test_link_decision_to_entity_rejects_unsafe_edge_type(fake_age_client):
     store = _new_store(fake_age_client)
 
     with pytest.raises(ValueError, match="Invalid edge_type"):
-        store.link_decision_to_entity("DEC-1", "ENT-1", edge_type="BAD EDGE")
+        store.link_decision_to_entity(
+            "DEC-1", "ENT-1", edge_type="BAD EDGE", domain="soc"
+        )
 
 
 def test_get_decision_links_reads_relationships_and_link_nodes(fake_age_client):
@@ -1917,7 +1921,7 @@ def test_get_decision_links_reads_relationships_and_link_nodes(fake_age_client):
         ]
     )
 
-    links = store.get_decision_links("DEC-1")
+    links = store.get_decision_links("DEC-1", domain="soc")
 
     assert links == [
         {
@@ -2121,7 +2125,7 @@ class TestAGEGraphStoreLive:
             {},
             metadata={"entity_id": "LIVE-ENT-2"},
         )
-        store.write_outcome(decision_id, "hold_for_review", True)
+        store.write_outcome(decision_id, "hold_for_review", True, domain="soc")
         assert store.count_verified("soc") >= 1
         assert store.count_correct("soc") >= 1
         store.close()

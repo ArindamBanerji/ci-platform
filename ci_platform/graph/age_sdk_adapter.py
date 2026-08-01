@@ -87,16 +87,37 @@ class AGEGraphStoreAdapter:
         actual_action: str,
         is_correct: bool,
         metadata: dict[str, Any] | None = None,
-        domain: str | None = None,
+        *,
+        domain: str,
+        outcome: str | None = None,
+        verified_at_epoch: float | None = None,
+        quality_signal: float | None = None,
+        override_comment: str | None = None,
+        verified_by: str | None = None,
+        analyst_action: str | None = None,
+        final_action: str | None = None,
+        recommended_action: str | None = None,
+        was_override: bool | None = None,
     ) -> None:
         kwargs: dict[str, Any] = {
             "decision_id": decision_id,
             "actual_action": actual_action,
             "is_correct": is_correct,
             "metadata": metadata,
+            "domain": domain,
         }
-        if domain is not None:
-            kwargs["domain"] = domain
+        optional = {
+            "outcome": outcome,
+            "verified_at_epoch": verified_at_epoch,
+            "quality_signal": quality_signal,
+            "override_comment": override_comment,
+            "verified_by": verified_by,
+            "analyst_action": analyst_action,
+            "final_action": final_action,
+            "recommended_action": recommended_action,
+            "was_override": was_override,
+        }
+        kwargs.update({key: value for key, value in optional.items() if value is not None})
         self._store.write_outcome(**kwargs)
 
     def write_observation(
@@ -265,7 +286,7 @@ class AGEGraphStoreAdapter:
             domain=domain,
         )
 
-    def get_decision(self, decision_id: str, domain: str | None = None) -> dict[str, Any] | None:
+    def get_decision(self, decision_id: str, domain: str) -> dict[str, Any] | None:
         return self._store.get_decision(decision_id, domain=domain)
 
     def get_decisions(
@@ -520,22 +541,24 @@ class AGEGraphStoreAdapter:
         decision_id: str,
         entity_id: str,
         edge_type: str = "DECIDED_ON",
+        *,
+        domain: str,
     ) -> None:
         self._store.link_decision_to_entity(
             decision_id=decision_id,
             entity_id=entity_id,
             edge_type=edge_type,
+            domain=domain,
         )
 
     def get_decision_links(
         self,
         decision_id: str | None = None,
-        domain: str | None = None,
+        *,
+        domain: str,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        kwargs: dict[str, Any] = {"decision_id": decision_id}
-        if domain is not None:
-            kwargs["domain"] = domain
+        kwargs: dict[str, Any] = {"decision_id": decision_id, "domain": domain}
         if limit is not None:
             kwargs["limit"] = limit
         return self._store.get_decision_links(**kwargs)
@@ -544,7 +567,8 @@ class AGEGraphStoreAdapter:
         self,
         entity_id: str,
         max_depth: int,
-        domain: str | None = None,
+        *,
+        domain: str,
     ) -> list[dict[str, Any]]:
         return self._store.query_context(
             entity_id=str(entity_id),
@@ -552,8 +576,12 @@ class AGEGraphStoreAdapter:
             domain=domain,
         )
 
-    def query_similar(self, entity_id: str, limit: int) -> list[dict[str, Any]]:
-        return self._store.query_similar(decision_id=str(entity_id), limit=int(limit))
+    def query_similar(
+        self, entity_id: str, limit: int, *, domain: str
+    ) -> list[dict[str, Any]]:
+        return self._store.query_similar(
+            decision_id=str(entity_id), limit=int(limit), domain=domain
+        )
 
     def write_entity_enrichment(
         self,

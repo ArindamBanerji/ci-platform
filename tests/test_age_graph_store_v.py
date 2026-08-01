@@ -76,26 +76,10 @@ class _InMemoryAGE:
             assert match is not None
             decision = next(item for item in self.decisions if item.decision_id == match.group(1))
             decision.status = "confirmed"
+            decision.correct = "d.correct = true" in query
             decision.outcome_is_correct = True
             return [{"status": "confirmed", "o": {}}]
         rows = self._soc_rows(query)
-        if "o.is_correct = true" in query:
-            total = sum(
-                1
-                for decision in rows
-                if (
-                    "d.archived IS NULL OR d.archived <> true" not in query
-                    or not decision.archived
-                )
-                and (
-                    (
-                        decision.status in ("confirmed", "overridden")
-                        and decision.outcome_is_correct is True
-                    )
-                    or (decision.status is None and decision.correct is True)
-                )
-            )
-            return [{"cnt": total}]
         if "d.correct = true" in query:
             total = sum(
                 1
@@ -104,8 +88,9 @@ class _InMemoryAGE:
                     "d.archived IS NULL OR d.archived <> true" not in query
                     or not decision.archived
                 )
-                and decision.status is None
-                and decision.correct is True
+                and (
+                    decision.correct is True
+                )
             )
             return [{"cnt": total}]
         if "RETURN DISTINCT properties(d) AS d, properties(o) AS o" in query:
@@ -164,6 +149,10 @@ def test_confirmed_and_overridden_status_rows_are_counted(store):
     assert store.count_verified("soc") == 3
 
 
+def test_count_verified_alias_matches_canonical_method(store):
+    assert store.count_verified("soc") == store.count_verified_decisions("soc")
+
+
 def test_legacy_embedded_outcome_row_is_counted(store):
     assert store.count_verified_decisions("soc") == 3
 
@@ -195,7 +184,7 @@ def test_archived_confirmed_row_is_excluded_from_d2(store):
     }
 
 
-def test_count_correct_uses_branch_1_outcome_and_branch_2_property(store):
+def test_count_correct_uses_decision_correct_property(store):
     assert store.count_correct("soc") == 2
 
 
@@ -217,7 +206,7 @@ def test_pending_to_outcome_transition_increments_v(store, fixture_graph):
     pending.outcome = None
     pending.correct = False
     assert store.count_verified("soc") == 3
-    store.write_outcome("SOC-PENDING", "approve", True)
+    store.write_outcome("SOC-PENDING", "approve", True, domain="soc")
     assert store.count_verified("soc") == 4
 
 
@@ -233,7 +222,7 @@ def test_mixed_branch_parity_across_all_soc_count_readers(store, fixture_graph, 
     expected = store.count_verified("soc")
     assert expected == 3
     assert asyncio.run(age_client.count_verified_decisions()) == expected
-    assert asyncio.run(age_client.count_correct_decisions()) == 0
+    assert asyncio.run(age_client.count_correct_decisions()) == 2
 
 
 def test_invalid_domain_fails_before_cypher(store, fixture_graph):
@@ -256,9 +245,10 @@ def test_get_decision_links_limit_is_global():
         {"decision_id": f"D-{index}", "entity_id": f"E-{index}", "edge_type": "DECIDED_ON"}
         for index in range(8)
     ]
+    store._client = _InMemoryAGE()
     calls = iter((rows, rows))
     store._run_query = lambda query: next(calls)
-    assert len(store.get_decision_links(limit=5)) <= 5
+    assert len(store.get_decision_links(limit=5, domain="soc")) <= 5
 
 
 def test_sqlite_d2_lifecycle_parity_in_memory():
@@ -269,7 +259,7 @@ def test_sqlite_d2_lifecycle_parity_in_memory():
         confirmed_id = sqlite_store.write_decision(
             "soc", "price_variance", "hold_for_review", 0.7, {"variance": 0.2}
         )
-        sqlite_store.write_outcome(confirmed_id, "hold_for_review", True)
+        sqlite_store.write_outcome(confirmed_id, "hold_for_review", True, domain="soc")
         sqlite_store.write_decision(
             "soc", "price_variance", "hold_for_review", 0.6, {"variance": 0.1}
         )

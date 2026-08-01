@@ -1,4 +1,8 @@
 {
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\domain_config.py": {
+    "mtime": 1778519511.5554385,
+    "hash": "fa87574be9bd36eb9d02b3ac0e7a6442"
+  },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\prompt0_ci_structural_map.py": {
     "mtime": 1777010876.4503324,
     "hash": "ee23e9afa7814e9f190d4d1714c7295e"
@@ -16,8 +20,8 @@
     "hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\auth\\saml.py": {
-    "mtime": 1776755846.5909245,
-    "hash": "2ef5f8cd854032819f796adab9876848"
+    "mtime": 1779086644.2685113,
+    "hash": "c5263203b1e7d5d1315fd4cd52616c97"
   },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\auth\\__init__.py": {
     "mtime": 1773986399.3095386,
@@ -27,9 +31,21 @@
     "mtime": 1773986434.5337868,
     "hash": "ba21d8d3c0ac2aead6f189f68da6bd13"
   },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\connectors\\celonis.py": {
+    "mtime": 1779195593.9112198,
+    "hash": "707f2515b9999cc6f8c965d3594641ab"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\connectors\\profiles.py": {
+    "mtime": 1779191661.3920534,
+    "hash": "981834c62507b84eefcc7679778d1671"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\connectors\\sap.py": {
+    "mtime": 1779218793.377441,
+    "hash": "2a9d28e429190750aedf9c798c9c7e76"
+  },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\connectors\\sentinel.py": {
-    "mtime": 1773990472.2287018,
-    "hash": "76d463a65acf0940566d47c851dbe84a"
+    "mtime": 1779086595.4214587,
+    "hash": "3b4c7cc7f823386af0edd1ca0d2222f2"
   },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\connectors\\sentinel_writeback.py": {
     "mtime": 1773991042.5478992,
@@ -39,9 +55,37 @@
     "mtime": 1773990781.7495131,
     "hash": "9d6d6bbe243a932250281c7e98045e90"
   },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\connectors\\transformers.py": {
+    "mtime": 1779190875.114053,
+    "hash": "388b4250095cbc16403a9b56db6d8a64"
+  },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\connectors\\__init__.py": {
     "mtime": 1773986399.2536187,
     "hash": "81051bcc2cf1bedf378224b0a93e2877"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\copilot_core\\background.py": {
+    "mtime": 1781236364.7587917,
+    "hash": "e6ce35c43e654132f609b46490c0ada5"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\copilot_core\\cache.py": {
+    "mtime": 1781093012.2847097,
+    "hash": "1e1bc5035d3172aefc2882e1c651b35e"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\copilot_core\\context_cache.py": {
+    "mtime": 1781093656.3403618,
+    "hash": "0b3b14601d55d4506b487734d44087ae"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\copilot_core\\counters.py": {
+    "mtime": 1781236118.6518135,
+    "hash": "a61abd658238a77329ef993801d6caba"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\copilot_core\\pipeline.py": {
+    "mtime": 1781124744.8976464,
+    "hash": "5150bcdbd83ca831f6179731988a7930"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\copilot_core\\__init__.py": {
+    "mtime": 1781124272.404161,
+    "hash": "fc08d9695a16a2e90ae5edba30bd5bd5"
   },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\enrichment\\enrichment_advisor.py": {
     "mtime": 1774503933.6275454,
@@ -60,12 +104,24 @@
     "hash": "81051bcc2cf1bedf378224b0a93e2877"
   },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\graph\\age_client.py": {
-    "mtime": 1776396016.473457,
-    "hash": "175cac818ef839e9bb8c51cc6d6dd12b"
+    "mtime": 1785258831.534055,
+    "hash": "8e24fbe1eac5a09a8b5bfb0e681d28e7"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\graph\\age_graph_store.py": {
+    "mtime": 1785584980.9869347,
+    "hash": "4c7b0ad42a2b3ba89862239c5190d358"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\graph\\age_sdk_adapter.py": {
+    "mtime": 1785554709.688091,
+    "hash": "e068f657103f972a8fcdff4a67531b57"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\graph\\agtype.py": {
+    "mtime": 1781246291.2778702,
+    "hash": "d0a9c0cce4ae0f93185803ed4b99377d"
   },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\graph\\__init__.py": {
-    "mtime": 1775677971.3808596,
-    "hash": "d4699b2d7df0e48c52f7acd754215ab1"
+    "mtime": 1778734510.1518357,
+    "hash": "bb1693f9c600efce149bf12f70a45591"
   },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\onboarding\\centroid_convergence.py": {
     "mtime": 1775663181.4209247,
@@ -99,6 +155,26 @@
     "mtime": 1775731040.2423635,
     "hash": "e7b7b951c1adcd8efad6f3adf1cb08f9"
   },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\strategy\\two_phase_strategy.py": {
+    "mtime": 1778629642.264563,
+    "hash": "426672a9966ba7bb560045ae681c5b29"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\ci_platform\\strategy\\__init__.py": {
+    "mtime": 1778629642.1622045,
+    "hash": "aa80c2949ec6f207da66e7e2c1efdd32"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\dataops\\schema.py": {
+    "mtime": 1778288579.543398,
+    "hash": "6a7166401b35cc41fb1c6365704db0d7"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\dataops\\__init__.py": {
+    "mtime": 1778288579.496722,
+    "hash": "5df48e97964902f8d5d77f2c1d881090"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\scripts\\seed_dataops_graph.py": {
+    "mtime": 1778327617.2370756,
+    "hash": "cf30fcc08d4559e7c831b0e75aca2bdd"
+  },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\scripts\\setup_age_windows.ps1": {
     "mtime": 1775723777.508386,
     "hash": "901e4780ac88db63354d312ea2a042a0"
@@ -107,25 +183,105 @@
     "mtime": 1775718336.1772468,
     "hash": "01fad4164227eaf7fd1498f4f8527436"
   },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\conftest.py": {
+    "mtime": 1785130131.1092005,
+    "hash": "dff06422595282f30959792106b29e34"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_age_archive.py": {
+    "mtime": 1784855840.4879024,
+    "hash": "8107292370104baf3d9f7df7508bb776"
+  },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_age_client.py": {
-    "mtime": 1776254034.3853006,
-    "hash": "9acaad9c5d7071bda89afab2674ae561"
+    "mtime": 1785130339.4967446,
+    "hash": "5bad0f7783224b8d72266d139cfc3a6d"
   },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_age_cypher_compat.py": {
     "mtime": 1775942784.251184,
     "hash": "c9b6ceb17ad76a808da5d223ea158ad6"
   },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_age_graph_store.py": {
+    "mtime": 1785573372.9114027,
+    "hash": "87d4e3ee6a019c918029bb87359a0ee7"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_age_graph_store_topology.py": {
+    "mtime": 1785328541.7108388,
+    "hash": "ee70bc3ea5bbcbf6468359e4f3f0b476"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_age_graph_store_v.py": {
+    "mtime": 1785573432.3729963,
+    "hash": "bb917bd502601f81277b0dee6984d56e"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_age_sdk_adapter.py": {
+    "mtime": 1785573499.9135056,
+    "hash": "d48729febfcb2f912860e201b81a7241"
+  },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_age_type_roundtrip.py": {
     "mtime": 1775952856.5476,
     "hash": "8d4800fe2c120baab16b6dee4bf3f4e4"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_agtype.py": {
+    "mtime": 1781246305.1163106,
+    "hash": "3f711995569f1e76ef180b5248c247a8"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_artifact_domain_scoping.py": {
+    "mtime": 1785585330.8279104,
+    "hash": "366f30b52b5c0672be30f2c62d251c40"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_background_task_manager.py": {
+    "mtime": 1781108535.1084318,
+    "hash": "73a724448a06527abc93e229d3c1bc84"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_celonis_connector.py": {
+    "mtime": 1779195593.9779186,
+    "hash": "e1d220acaca0b4cc30281b2e6f80be00"
   },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_centroid_distance.py": {
     "mtime": 1775663085.5276303,
     "hash": "35dab92de798b2c09f47283c2e2d6aea"
   },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_connector_transformers.py": {
+    "mtime": 1779190792.028216,
+    "hash": "b345aa0a47c9fd94e356218d843882d7"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_counter_store.py": {
+    "mtime": 1785130289.1792483,
+    "hash": "e99407aa3bec3a858a9da33e2c0470ca"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_counter_store_live_age.py": {
+    "mtime": 1785130291.171438,
+    "hash": "6e7de3ee52b0e9fc5304803e3f1554b1"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_counter_store_route_readiness.py": {
+    "mtime": 1785130293.0776641,
+    "hash": "160bccc5e4b1ac7a92542c6889a40e05"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_dataops_schema.py": {
+    "mtime": 1778289337.0967696,
+    "hash": "59ab899336b369b1cbe8f30628681485"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_decision_pipeline.py": {
+    "mtime": 1781124775.0663695,
+    "hash": "5eeb6f45fd212f3dc93e4f38b336d70c"
+  },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_deployment_qualification.py": {
     "mtime": 1774442670.1988797,
     "hash": "6dfbebeae4ded964af4cbf0f81c7befa"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_domain_enforcement.py": {
+    "mtime": 1785574164.1429064,
+    "hash": "f69abea133f14f7fae35cc52233c8f48"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_enterprise_connector_profiles.py": {
+    "mtime": 1779191604.182216,
+    "hash": "d2aab974840f77d6d73053810d794b63"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_entity_cache.py": {
+    "mtime": 1781093055.450804,
+    "hash": "9338118b99b51be027a57186e7f79843"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_entity_cache_integration.py": {
+    "mtime": 1781093616.4292252,
+    "hash": "fd359563f2b47d383ecabd8342e9b885"
   },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_entity_resolution.py": {
     "mtime": 1773990086.4455647,
@@ -143,6 +299,10 @@
     "mtime": 1776255342.0832613,
     "hash": "554adf6cc06a26d140152224a727849e"
   },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_l5_upsert_current.py": {
+    "mtime": 1780914697.8684978,
+    "hash": "c5cf6788fb3f729d9730b3f37d505c02"
+  },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_onboarding_pipeline.py": {
     "mtime": 1774487367.0247712,
     "hash": "2e40ae7e0cf006f9f1860b4e02ac798b"
@@ -155,9 +315,17 @@
     "mtime": 1773989260.9138637,
     "hash": "9d5e407d8e61d8212020f0295b9078ac"
   },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_s2p_domain_config_v2.py": {
+    "mtime": 1778519511.636822,
+    "hash": "9a9900d209f9161a1e6a5c9c4b2f22df"
+  },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_saml.py": {
     "mtime": 1776755860.640126,
     "hash": "ed6c10c22dff00bb552c3adec4bb46c9"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_sap_connector.py": {
+    "mtime": 1779218848.7375696,
+    "hash": "bb415613afefabe28a81945664f1c57b"
   },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_sentinel.py": {
     "mtime": 1773990490.6368425,
@@ -170,6 +338,14 @@
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_splunk.py": {
     "mtime": 1773990801.6780143,
     "hash": "583d16e190a27d85788aabf45fb32660"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_two_phase_strategy.py": {
+    "mtime": 1778629642.3574133,
+    "hash": "39de058d73990cf0e872e5e8c6065935"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\test_type_checking.py": {
+    "mtime": 1779086595.5809011,
+    "hash": "9cf12bb2f8d34b9320f3f510ece312ed"
   },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\__init__.py": {
     "mtime": 1773986400.6537266,
@@ -184,8 +360,8 @@
     "hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\CLAUDE.md": {
-    "mtime": 1776250223.1710844,
-    "hash": "383c15c360d45628a578097b7acf003e"
+    "mtime": 1785128459.9246306,
+    "hash": "4717f8f8201ddf6e7a686b8d630f184a"
   },
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\CODE_GRAPH_REVIEW.md": {
     "mtime": 1777639300.0889525,
@@ -210,5 +386,29 @@
   "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\test_results_ci_verbose.txt": {
     "mtime": 1775835363.696263,
     "hash": "2b2147cd63f64ceb3ea980cb92f1d30f"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\docs\\implementation_plans\\dataops_graph_schema_seed.md": {
+    "mtime": 1778288385.9382255,
+    "hash": "55413da4906d968ef6ca7cd3bac2729f"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\docs\\implementation_plans\\ent_cmdb_identity.md": {
+    "mtime": 1779174886.4211848,
+    "hash": "c859ec9f7fc85188fa5224a7ab9c5ca6"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\docs\\implementation_plans\\g15_pycelonis_connector.md": {
+    "mtime": 1779195138.5343263,
+    "hash": "32f09c5c4f54eee4b65d55dc443c6ee5"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\docs\\implementation_plans\\sap_odata_connector.md": {
+    "mtime": 1779216141.9331722,
+    "hash": "e149f1e5c42baacde60a2e6d1bb942c0"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\fixtures\\cmdb_profile.yaml": {
+    "mtime": 1779191576.7123377,
+    "hash": "55757ca95f6350fbfb575bef84d9eca5"
+  },
+  "C:\\Users\\baner\\CopyFolder\\IoT_thoughts\\python-projects\\kaggle_experiments\\claude_projects\\ci-platform\\tests\\fixtures\\identity_profile.yaml": {
+    "mtime": 1779191576.7757926,
+    "hash": "37e9d2286b0267a3c102aae661b6ebcf"
   }
 }

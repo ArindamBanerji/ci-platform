@@ -37,11 +37,11 @@ class FakeGraphStore:
         self.calls.append(("write_decision", domain, category, action, confidence, factors, metadata))
         return "DEC-2"
 
-    def write_outcome(self, decision_id, actual_action, is_correct, metadata=None):
-        self.calls.append(("write_outcome", decision_id, actual_action, is_correct, metadata))
+    def write_outcome(self, decision_id, actual_action, is_correct, metadata=None, *, domain):
+        self.calls.append(("write_outcome", decision_id, actual_action, is_correct, metadata, domain))
 
-    def get_decision(self, decision_id, domain=None):
-        self.calls.append(("get_decision", decision_id))
+    def get_decision(self, decision_id, domain):
+        self.calls.append(("get_decision", decision_id, domain))
         return self.decisions.get(decision_id)
 
     def get_decisions(self, domain, category=None, limit=400):
@@ -224,11 +224,15 @@ class FakeGraphStore:
         self.calls.append(("count_archived", domain))
         return 0
 
-    def link_decision_to_entity(self, decision_id, entity_id, edge_type="DECIDED_ON"):
-        self.calls.append(("link_decision_to_entity", decision_id, entity_id, edge_type))
+    def link_decision_to_entity(
+        self, decision_id, entity_id, edge_type="DECIDED_ON", *, domain
+    ):
+        self.calls.append(
+            ("link_decision_to_entity", decision_id, entity_id, edge_type, domain)
+        )
 
-    def get_decision_links(self, decision_id=None):
-        self.calls.append(("get_decision_links", decision_id))
+    def get_decision_links(self, decision_id=None, *, domain, limit=None):
+        self.calls.append(("get_decision_links", decision_id, domain, limit))
         return [
             {
                 "decision_id": decision_id or "DEC-1",
@@ -322,7 +326,9 @@ def test_adapter_delegates_decision_and_outcome_methods():
         factors={"duplicate_score": 0.8},
         metadata={"source": "unit", "entity_id": "ENT-2"},
     )
-    adapter.write_outcome(decision_id, "flag_leakage", True, metadata={"verified_by": "unit"})
+    adapter.write_outcome(
+        decision_id, "flag_leakage", True, metadata={"verified_by": "unit"}, domain="soc"
+    )
 
     assert decision_id == "DEC-2"
     assert store.calls[0] == (
@@ -340,6 +346,7 @@ def test_adapter_delegates_decision_and_outcome_methods():
         "flag_leakage",
         True,
         {"verified_by": "unit"},
+        "soc",
     )
 
 
@@ -362,7 +369,7 @@ def test_adapter_delegates_counts_and_reads():
     store = FakeGraphStore()
     adapter = AGEGraphStoreAdapter(store=store)
 
-    assert adapter.get_decision("DEC-1")["decision_id"] == "DEC-1"
+    assert adapter.get_decision("DEC-1", domain="soc")["decision_id"] == "DEC-1"
     assert adapter.get_decisions("soc", category="price_variance", limit=10)
     assert adapter.get_all_decisions("soc")
     assert adapter.count_verified("soc") == 1
@@ -634,11 +641,19 @@ def test_adapter_delegates_decision_entity_links():
     store = FakeGraphStore()
     adapter = AGEGraphStoreAdapter(store=store)
 
-    adapter.link_decision_to_entity("DEC-1", "ENT-1", edge_type="REVIEWS")
-    links = adapter.get_decision_links("DEC-1")
+    adapter.link_decision_to_entity(
+        "DEC-1", "ENT-1", edge_type="REVIEWS", domain="soc"
+    )
+    links = adapter.get_decision_links("DEC-1", domain="soc")
 
-    assert ("link_decision_to_entity", "DEC-1", "ENT-1", "REVIEWS") in store.calls
-    assert ("get_decision_links", "DEC-1") in store.calls
+    assert (
+        "link_decision_to_entity",
+        "DEC-1",
+        "ENT-1",
+        "REVIEWS",
+        "soc",
+    ) in store.calls
+    assert ("get_decision_links", "DEC-1", "soc", None) in store.calls
     assert links == [
         {
             "decision_id": "DEC-1",
@@ -724,8 +739,8 @@ class TestAGEGraphStoreAdapterLive:
             {"amount_variance_ratio": 0.2},
             metadata={"entity_id": "LIVE-SDK-ENT-1"},
         )
-        decision = adapter.get_decision(decision_id)
-        adapter.write_outcome(decision_id, "hold_for_review", True)
+        decision = adapter.get_decision(decision_id, domain="soc")
+        adapter.write_outcome(decision_id, "hold_for_review", True, domain="soc")
         verified = adapter.get_verified_decisions("soc")
 
         assert decision_id.startswith("DEC-")

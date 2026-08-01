@@ -889,7 +889,17 @@ class AGEGraphStore:
         actual_action: str,
         is_correct: bool,
         metadata: Optional[Dict[str, Any]] = None,
-        domain: Optional[str] = None,
+        *,
+        domain: str,
+        outcome: Optional[str] = None,
+        verified_at_epoch: Optional[float] = None,
+        quality_signal: Optional[float] = None,
+        override_comment: Optional[str] = None,
+        verified_by: Optional[str] = None,
+        analyst_action: Optional[str] = None,
+        final_action: Optional[str] = None,
+        recommended_action: Optional[str] = None,
+        was_override: Optional[bool] = None,
     ) -> None:
         metadata_dict = dict(metadata or {})
         actual_index = int(metadata_dict.get("actual_index", 0))
@@ -900,13 +910,34 @@ class AGEGraphStore:
         created_at = float(metadata_dict.get("created_at", verified_at))
         metadata_json = json.dumps(metadata_dict, sort_keys=True)
         status = "confirmed" if bool(is_correct) else "overridden"
-        domain_literal = self._S(self._validated_domain(domain)) if domain is not None else None
-        decision_domain_where = f"WHERE d.domain = {domain_literal}" if domain_literal is not None else ""
-        outcome_pattern = (
-            f"{{decision_id: {self._S(decision_id)}, domain: {domain_literal}}}"
-            if domain_literal is not None
-            else f"{{decision_id: {self._S(decision_id)}}}"
-        )
+        domain_literal = self._S(self._validated_domain(domain))
+        decision_domain_where = f"WHERE d.domain = {domain_literal}"
+        outcome_pattern = f"{{decision_id: {self._S(decision_id)}, domain: {domain_literal}}}"
+        decision_updates = [
+            f"d.status = {self._S(status)}",
+            f"d.correct = {str(bool(is_correct)).lower()}",
+        ]
+        optional_updates = {
+            "outcome": outcome,
+            "verified_at_epoch": verified_at_epoch,
+            "quality_signal": quality_signal,
+            "override_comment": override_comment,
+            "verified_by": verified_by,
+            "analyst_action": analyst_action,
+            "final_action": final_action,
+            "recommended_action": recommended_action,
+            "was_override": was_override,
+        }
+        for property_name, value in optional_updates.items():
+            if value is None:
+                continue
+            serialized = (
+                str(bool(value)).lower()
+                if isinstance(value, bool)
+                else self._S(value)
+            )
+            decision_updates.append(f"d.{property_name} = {serialized}")
+        decision_set = ",\n            ".join(decision_updates)
         query = f"""
         MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
         {decision_domain_where}
@@ -917,7 +948,7 @@ class AGEGraphStore:
         WHERE linked_outcome_count = 0
           AND same_decision_outcome_count = 0
           AND d.status = 'pending'
-        SET d.status = {self._S(status)}
+        SET {decision_set}
         CREATE (o:Outcome {{
             decision_id: {self._S(decision_id)},
             domain: d.domain,
@@ -942,14 +973,10 @@ class AGEGraphStore:
             return
         self._raise_write_outcome_no_row(decision_id, domain=domain)
 
-    def _raise_write_outcome_no_row(self, decision_id: str, domain: Optional[str] = None) -> None:
-        domain_literal = self._S(self._validated_domain(domain)) if domain is not None else None
-        decision_domain_where = f"WHERE d.domain = {domain_literal}" if domain_literal is not None else ""
-        outcome_pattern = (
-            f"{{decision_id: {self._S(decision_id)}, domain: {domain_literal}}}"
-            if domain_literal is not None
-            else f"{{decision_id: {self._S(decision_id)}}}"
-        )
+    def _raise_write_outcome_no_row(self, decision_id: str, *, domain: str) -> None:
+        domain_literal = self._S(self._validated_domain(domain))
+        decision_domain_where = f"WHERE d.domain = {domain_literal}"
+        outcome_pattern = f"{{decision_id: {self._S(decision_id)}, domain: {domain_literal}}}"
         decision_rows = self._run_query(
             f"""
             MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
@@ -1173,7 +1200,9 @@ class AGEGraphStore:
             "policy_version": str(policy_version),
             "counts_scope": "verified_only",
         }
-        existing = self._get_conservation_status_payload(str(status_id))
+        existing = self._get_conservation_status_payload(
+            str(status_id), domain=str(domain)
+        )
         if existing is not None:
             if existing == payload:
                 self._link_domain_summary(
@@ -1211,10 +1240,14 @@ class AGEGraphStore:
             domain=str(domain),
         )
 
-    def _get_conservation_status_payload(self, status_id: str) -> Optional[Dict[str, Any]]:
+    def _get_conservation_status_payload(
+        self, status_id: str, *, domain: str
+    ) -> Optional[Dict[str, Any]]:
+        domain_literal = self._S(self._validated_domain(domain))
         rows = self._run_query(
             f"""
             MATCH (c:ConservationStatus {{status_id: {self._S(status_id)}}})
+            WHERE c.domain = {domain_literal}
             RETURN c
             LIMIT 1
             """
@@ -1256,7 +1289,9 @@ class AGEGraphStore:
             "window": int(window),
             "metadata_json": json.dumps(dict(metadata or {}), sort_keys=True),
         }
-        existing = self._get_fingerprint_payload(str(fingerprint_id))
+        existing = self._get_fingerprint_payload(
+            str(fingerprint_id), domain=str(domain)
+        )
         if existing is not None:
             if existing == payload:
                 self._link_domain_summary(
@@ -1290,10 +1325,14 @@ class AGEGraphStore:
             domain=str(domain),
         )
 
-    def _get_fingerprint_payload(self, fingerprint_id: str) -> Optional[Dict[str, Any]]:
+    def _get_fingerprint_payload(
+        self, fingerprint_id: str, *, domain: str
+    ) -> Optional[Dict[str, Any]]:
+        domain_literal = self._S(self._validated_domain(domain))
         rows = self._run_query(
             f"""
             MATCH (f:Fingerprint {{fingerprint_id: {self._S(fingerprint_id)}}})
+            WHERE f.domain = {domain_literal}
             RETURN f
             LIMIT 1
             """
@@ -1346,7 +1385,9 @@ class AGEGraphStore:
             "factor_names_hash": str(factor_names_hash),
             "metadata_json": json.dumps(metadata, sort_keys=True),
         }
-        existing = self._get_centroid_checkpoint_payload(str(checkpoint_id))
+        existing = self._get_centroid_checkpoint_payload(
+            str(checkpoint_id), domain=str(domain)
+        )
         if existing is not None:
             if existing == payload:
                 if decision_id:
@@ -1384,10 +1425,14 @@ class AGEGraphStore:
                 domain=str(domain),
             )
 
-    def _get_centroid_checkpoint_payload(self, checkpoint_id: str) -> Optional[Dict[str, Any]]:
+    def _get_centroid_checkpoint_payload(
+        self, checkpoint_id: str, *, domain: str
+    ) -> Optional[Dict[str, Any]]:
+        domain_literal = self._S(self._validated_domain(domain))
         rows = self._run_query(
             f"""
             MATCH (c:CentroidCheckpoint {{checkpoint_id: {self._S(checkpoint_id)}}})
+            WHERE c.domain = {domain_literal}
             RETURN c
             LIMIT 1
             """
@@ -1663,7 +1708,9 @@ class AGEGraphStore:
             "min_shadow_batches": None if min_shadow_batches is None else int(min_shadow_batches),
             "metadata_json": json.dumps(dict(metadata or {}), sort_keys=True),
         }
-        existing = self._get_evolution_event_payload(str(event_id))
+        existing = self._get_evolution_event_payload(
+            str(event_id), domain=str(domain)
+        )
         if existing is not None:
             if existing == payload:
                 return
@@ -1894,10 +1941,14 @@ class AGEGraphStore:
             ),
         )
 
-    def _get_evolution_event_payload(self, event_id: str) -> Optional[Dict[str, Any]]:
+    def _get_evolution_event_payload(
+        self, event_id: str, *, domain: str
+    ) -> Optional[Dict[str, Any]]:
+        domain_literal = self._S(self._validated_domain(domain))
         rows = self._run_query(
             f"""
             MATCH (e:EvolutionEvent {{event_id: {self._S(event_id)}}})
+            WHERE e.domain = {domain_literal}
             RETURN e
             LIMIT 1
             """
@@ -2012,8 +2063,8 @@ class AGEGraphStore:
             return
         raise RuntimeError(f"AGE link_entity returned no rows for decision_id: {decision_id}")
 
-    def get_decision(self, decision_id: str, domain: str | None = None) -> Optional[Dict[str, Any]]:
-        domain_clause = f"WHERE d.domain = {self._S(domain)}" if domain is not None else ""
+    def get_decision(self, decision_id: str, domain: str) -> Optional[Dict[str, Any]]:
+        domain_clause = f"WHERE d.domain = {self._S(self._validated_domain(domain))}"
         rows = self._run_query(
             f"""
             MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
@@ -2069,21 +2120,9 @@ class AGEGraphStore:
         return [self._merge_decision_outcome(row) for row in rows]
 
     def count_verified(self, domain: str) -> int:
-        domain_clause = self._domain_clause(domain)
-        rows = self._run_query(
-            f"""
-            MATCH (d:Decision)
-            WHERE {domain_clause}
-              AND (d.archived IS NULL OR d.archived <> true)
-              AND (
-                  (d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden'])
-                  OR
-                  (d.status IS NULL AND d.outcome IS NOT NULL)
-              )
-            RETURN count(DISTINCT d.decision_id) AS v
-            """
-        )
-        return self._int_from_rows(rows, "v" if rows and "v" in rows[0] else "cnt")
+        # Keep the legacy public name delegated to the canonical implementation
+        # so the two verified-count paths cannot drift apart again.
+        return self.count_verified_decisions(domain)
 
     def count_verified_decisions(self, domain: str) -> int:
         domain_clause = self._domain_clause(domain)
@@ -2107,15 +2146,9 @@ class AGEGraphStore:
         rows = self._run_query(
             f"""
             MATCH (d:Decision)
-            OPTIONAL MATCH (d)-[:HAS_OUTCOME]->(o:Outcome)
-            WITH d, o
             WHERE {domain_clause}
               AND (d.archived IS NULL OR d.archived <> true)
-              AND (
-                  (d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden'] AND o.is_correct = true)
-                  OR
-                  (d.status IS NULL AND d.correct = true)
-              )
+              AND d.correct = true
             RETURN count(DISTINCT d.decision_id) AS cnt
             """
         )
@@ -2642,12 +2675,16 @@ class AGEGraphStore:
         decision_id: str,
         entity_id: str,
         edge_type: str = "DECIDED_ON",
-        domain: str | None = None,
+        *,
+        domain: str,
     ) -> None:
+        domain_value = str(domain).strip()
+        if not domain_value:
+            raise ValueError("link_decision_to_entity requires a non-empty domain")
         edge_label = self._safe_edge_type(edge_type)
         created_at = datetime.now(timezone.utc).isoformat()
-        props = self._link_props(decision_id, entity_id, edge_label, created_at)
-        domain_clause = f"WHERE d.domain = {self._S(domain)}" if domain is not None else ""
+        props = self._link_props(decision_id, entity_id, edge_label, created_at, domain_value)
+        domain_clause = f"WHERE d.domain = {self._S(domain_value)}"
         query = f"""
         MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
         {domain_clause}
@@ -2657,7 +2694,8 @@ class AGEGraphStore:
             decision_id: {self._S(decision_id)},
             entity_id: {self._S(entity_id)},
             edge_type: {self._S(edge_label)},
-            created_at: {self._S(created_at)}
+            created_at: {self._S(created_at)},
+            domain: {self._S(domain_value)}
         }}]->(e)
         RETURN d, e
         """
@@ -2668,15 +2706,16 @@ class AGEGraphStore:
     def get_decision_links(
         self,
         decision_id: str | None = None,
-        domain: str | None = None,
+        *,
+        domain: str,
         limit: int | None = None,
     ) -> List[Dict[str, Any]]:
+        domain_value = self._validated_domain(domain)
         limit_clause = f"LIMIT {max(0, int(limit))}" if limit is not None else ""
         relationship_clauses = []
         if decision_id is not None:
             relationship_clauses.append(f"d.decision_id = {self._S(decision_id)}")
-        if domain is not None:
-            relationship_clauses.append(f"d.domain = {self._S(domain)}")
+        relationship_clauses.append(f"d.domain = {self._S(domain_value)}")
         where_relationship = (
             "WHERE " + " AND ".join(relationship_clauses)
             if relationship_clauses
@@ -2696,8 +2735,7 @@ class AGEGraphStore:
         link_clauses = []
         if decision_id is not None:
             link_clauses.append(f"l.decision_id = {self._S(decision_id)}")
-        if domain is not None:
-            link_clauses.append(f"d.domain = {self._S(domain)}")
+        link_clauses.append(f"d.domain = {self._S(domain_value)}")
         where_link = "WHERE " + " AND ".join(link_clauses) if link_clauses else ""
         link_rows = self._run_query(
             f"""
@@ -2730,13 +2768,15 @@ class AGEGraphStore:
         entity_id: str,
         edge_type: str,
         created_at: str,
+        domain: str,
     ) -> str:
         return (
             "{"
             f"decision_id: {self._S(decision_id)}, "
             f"entity_id: {self._S(entity_id)}, "
             f"edge_type: {self._S(edge_type)}, "
-            f"created_at: {self._S(created_at)}"
+            f"created_at: {self._S(created_at)}, "
+            f"domain: {self._S(domain)}"
             "}"
         )
 
@@ -3075,16 +3115,15 @@ class AGEGraphStore:
         self,
         entity_id: str,
         hops: int = 2,
-        domain: str | None = None,
+        *,
+        domain: str,
     ) -> List[Dict[str, Any]]:
         hop_count = self._safe_hops(hops)
-        domain_clause = ""
-        if domain is not None:
-            domain_value = self._validated_domain(domain)
-            # All production Decision nodes are domain-stamped. NULL-domain
-            # nodes are legacy artifacts and must not cross the domain
-            # boundary during production traversal.
-            domain_clause = f"WHERE n.domain = {self._S(domain_value)}"
+        domain_value = self._validated_domain(domain)
+        # All production Decision nodes are domain-stamped. NULL-domain
+        # nodes are legacy artifacts and must not cross the domain
+        # boundary during production traversal.
+        domain_clause = f"WHERE n.domain = {self._S(domain_value)}"
         rows = self._run_query(
             f"""
             MATCH p = (e {{entity_id: {self._S(entity_id)}}})-[*1..{hop_count}]-(n)
@@ -3095,13 +3134,18 @@ class AGEGraphStore:
         )
         return [self._node_to_dict(row) for row in rows]
 
-    def query_similar(self, decision_id: str, limit: int = 5) -> List[Dict[str, Any]]:
+    def query_similar(
+        self, decision_id: str, limit: int = 5, *, domain: str
+    ) -> List[Dict[str, Any]]:
+        domain_value = self._validated_domain(domain)
         limit_value = self._safe_limit(limit, default=5)
         rows = self._run_query(
             f"""
             MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
             MATCH (s:Decision {{category: d.category}})
-            WHERE s.decision_id <> d.decision_id AND s.domain = d.domain
+            WHERE d.domain = {self._S(domain_value)}
+              AND s.decision_id <> d.decision_id
+              AND s.domain = {self._S(domain_value)}
             RETURN s
             LIMIT {limit_value}
             """
