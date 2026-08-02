@@ -73,12 +73,12 @@ class FakeArchiveStore(AGEGraphStore):
             )
             return [{"decision_id": decision["decision_id"]} for decision in decisions]
 
-        if "RETURN count(DISTINCT d.decision_id) AS v" in query:
+        if "RETURN count(DISTINCT d.decision_id) AS cnt" in query:
             total = sum(
                 decision.get("status") in {"confirmed", "overridden"}
                 for decision in self._active(domain)
             )
-            return [{"v": total}]
+            return [{"cnt": total}]
 
         if "RETURN count(d) AS cnt" in query:
             return [{"cnt": len(self._active(domain))}]

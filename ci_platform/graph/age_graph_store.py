@@ -564,9 +564,9 @@ class AGEGraphStore:
         factors: Dict[str, Any],
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
-        decision_id = f"DEC-{uuid.uuid4().hex[:8]}"
-        confidence_value = float(confidence)
         metadata_dict = dict(metadata or {})
+        decision_id = str(metadata_dict.get("decision_id") or f"DEC-{uuid.uuid4().hex[:8]}")
+        confidence_value = float(confidence)
         entity_id = str(metadata_dict.get("entity_id") or "")
         factors_json = json.dumps(factors or {}, sort_keys=True)
         metadata_json = json.dumps(metadata_dict, sort_keys=True)
@@ -1694,6 +1694,7 @@ class AGEGraphStore:
         shadow_batch_size: Optional[int] = None,
         min_shadow_batches: Optional[int] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        decision_id: Optional[str] = None,
     ) -> None:
         payload = {
             "event_id": str(event_id),
@@ -1713,6 +1714,11 @@ class AGEGraphStore:
         )
         if existing is not None:
             if existing == payload:
+                self._link_evolution_decision(
+                    decision_id=decision_id,
+                    event_id=str(event_id),
+                    domain=str(domain),
+                )
                 return
             raise ValueError(f"conflicting evolution event_id: {event_id}")
 
@@ -1735,6 +1741,40 @@ class AGEGraphStore:
             "}"
         )
         self._run_query(f"CREATE (e:EvolutionEvent {props}) RETURN e")
+        self._link_evolution_decision(
+            decision_id=decision_id,
+            event_id=str(event_id),
+            domain=str(domain),
+        )
+
+    def _link_evolution_decision(
+        self,
+        *,
+        decision_id: Optional[str],
+        event_id: str,
+        domain: str,
+    ) -> None:
+        if decision_id is None:
+            return
+        self._run_query(
+            """
+            MATCH (d:Decision {decision_id: %s})
+            WHERE d.domain = %s
+            MATCH (e:EvolutionEvent {event_id: %s})
+            WHERE e.domain = %s
+            OPTIONAL MATCH (d)-[r:TRIGGERED_EVOLUTION]->(e)
+            WITH d, e, count(r) AS edge_count
+            WHERE edge_count = 0
+            CREATE (d)-[:TRIGGERED_EVOLUTION]->(e)
+            RETURN e
+            """
+            % (
+                self._S(str(decision_id)),
+                self._S(str(domain)),
+                self._S(str(event_id)),
+                self._S(str(domain)),
+            )
+        )
 
     def write_transfer_pattern(
         self,
@@ -2106,11 +2146,7 @@ class AGEGraphStore:
             MATCH (d:Decision)
             WHERE {domain_clause}
               AND (d.archived IS NULL OR d.archived <> true)
-              AND (
-                  (d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden'])
-                  OR
-                  (d.status IS NULL AND d.outcome IS NOT NULL)
-            )
+              AND d.status IN ['confirmed', 'overridden']
             OPTIONAL MATCH (d)-[:HAS_OUTCOME]->(o:Outcome)
             RETURN DISTINCT properties(d) AS d, properties(o) AS o,
                 d.created_at AS _created_at, d.decision_id AS _decision_id
@@ -2131,15 +2167,11 @@ class AGEGraphStore:
             MATCH (d:Decision)
             WHERE {domain_clause}
               AND (d.archived IS NULL OR d.archived <> true)
-              AND (
-                  (d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden'])
-                  OR
-                  (d.status IS NULL AND d.outcome IS NOT NULL)
-              )
-            RETURN count(DISTINCT d.decision_id) AS v
+              AND d.status IN ['confirmed', 'overridden']
+            RETURN count(DISTINCT d.decision_id) AS cnt
             """
         )
-        return self._int_from_rows(rows, "v" if rows and "v" in rows[0] else "cnt")
+        return self._int_from_rows(rows, "cnt")
 
     def count_correct(self, domain: str) -> int:
         domain_clause = self._domain_clause(domain)
@@ -2148,6 +2180,7 @@ class AGEGraphStore:
             MATCH (d:Decision)
             WHERE {domain_clause}
               AND (d.archived IS NULL OR d.archived <> true)
+              AND d.status IN ['confirmed', 'overridden']
               AND d.correct = true
             RETURN count(DISTINCT d.decision_id) AS cnt
             """
@@ -2173,11 +2206,7 @@ class AGEGraphStore:
             MATCH (d:Decision)
             WHERE {domain_clause}
               AND (d.archived IS NULL OR d.archived <> true)
-              AND (
-                  (d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden'])
-                  OR
-                  (d.status IS NULL AND d.outcome IS NOT NULL)
-              )
+              AND d.status IN ['confirmed', 'overridden']
             WITH d.category AS cat, count(d) AS cnt
             WHERE cnt >= {threshold}
             RETURN count(cat) AS cnt

@@ -257,6 +257,7 @@ class AGEGraphStoreAdapter:
         shadow_batch_size: int | None = None,
         min_shadow_batches: int | None = None,
         metadata: dict[str, Any] | None = None,
+        decision_id: str | None = None,
     ) -> None:
         self._store.write_evolution_event(
             event_id=event_id,
@@ -270,6 +271,7 @@ class AGEGraphStoreAdapter:
             shadow_batch_size=shadow_batch_size,
             min_shadow_batches=min_shadow_batches,
             metadata=metadata,
+            decision_id=decision_id,
         )
 
     def link_entity(

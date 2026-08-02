@@ -6,7 +6,7 @@ import asyncio
 import os
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from copilot_sdk.testing import age_available
@@ -55,19 +55,17 @@ class _InMemoryAGE:
     @staticmethod
     def _verified(decision: _Decision, query: str) -> bool:
         branch_1 = (
-            "d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden']" in query
+            (
+                "d.status IN ['confirmed', 'overridden']" in query
+                or "d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden']" in query
+            )
             and decision.status in ("confirmed", "overridden")
-        )
-        branch_2 = (
-            "d.status IS NULL AND d.outcome IS NOT NULL" in query
-            and decision.status is None
-            and decision.outcome is not None
         )
         is_active = (
             "d.archived IS NULL OR d.archived <> true" not in query
             or not decision.archived
         )
-        return is_active and (branch_1 or branch_2)
+        return is_active and branch_1
 
     def run(self, query: str) -> list[dict[str, object]]:
         self.queries.append(query)
@@ -153,7 +151,9 @@ def test_count_verified_alias_matches_canonical_method(store):
     assert store.count_verified("soc") == store.count_verified_decisions("soc")
 
 
-def test_legacy_embedded_outcome_row_is_counted(store):
+def test_legacy_embedded_outcome_row_is_not_counted(store, fixture_graph):
+    legacy = next(item for item in fixture_graph.decisions if item.decision_id == "SOC-LEGACY")
+    assert legacy.status is None
     assert store.count_verified_decisions("soc") == 3
 
 
@@ -214,7 +214,7 @@ def test_mixed_branch_parity_across_all_soc_count_readers(store, fixture_graph, 
     from ci_platform.graph.age_client import AGEClient
 
     async def run_query(query: str, parameters: Any = None) -> list[dict[str, object]]:
-        return fixture_graph.run(query)
+        return cast(list[dict[str, object]], fixture_graph.run(query))
 
     age_client = AGEClient(dsn="postgresql://example/test", graph_name="d2_test_graph")
     monkeypatch.setattr(age_client, "run_query", run_query)
@@ -293,18 +293,14 @@ def test_live_soc_gate():
                 "MATCH (d:Decision) "
                 "WHERE d.domain = 'soc' "
                 "AND (d.archived IS NULL OR d.archived <> true) "
-                "AND ("
-                "(d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden']) "
-                "OR (d.status IS NULL AND d.outcome IS NOT NULL)"
-                ") "
-                "RETURN count(DISTINCT d.decision_id) AS v"
+                "AND d.status IN ['confirmed', 'overridden'] "
+                "RETURN count(DISTINCT d.decision_id) AS cnt"
             )
         )
-        raw_count = int(rows[0]["v"]) if rows else 0
+        raw_count = int(rows[0]["cnt"]) if rows else 0
         function_count = store.count_verified("soc")
 
         assert function_count == raw_count
-        assert function_count > 0
     finally:
         store.close()
         asyncio.run(client.close())

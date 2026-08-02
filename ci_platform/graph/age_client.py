@@ -724,10 +724,7 @@ class AGEClient:
                 "MATCH (d:Decision) "
                 "WHERE d.domain = 'soc' "
                 "AND (d.archived IS NULL OR d.archived <> true) "
-                "AND ("
-                "(d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden']) "
-                "OR (d.status IS NULL AND d.outcome IS NOT NULL)"
-                ") "
+                "AND d.status IN ['confirmed', 'overridden'] "
                 "RETURN count(DISTINCT d.decision_id) AS cnt"
             )
             return int(results[0]["cnt"]) if results else 0
@@ -741,6 +738,7 @@ class AGEClient:
                 "MATCH (d:Decision) "
                 "WHERE d.domain = 'soc' "
                 "AND (d.archived IS NULL OR d.archived <> true) "
+                "AND d.status IN ['confirmed', 'overridden'] "
                 "AND d.correct = true "
                 "RETURN count(DISTINCT d.decision_id) AS cnt"
             )
