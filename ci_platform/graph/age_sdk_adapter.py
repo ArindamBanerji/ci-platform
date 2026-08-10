@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from ci_platform.graph.age_graph_store import AGEGraphStore
 
@@ -16,12 +16,14 @@ class AGEGraphStoreAdapter:
         dsn: str | None = None,
         graph_name: str = "soc_graph",
         store: AGEGraphStore | None = None,
+        domain: str = "graph",
     ) -> None:
         if store is None:
             if dsn is None:
                 raise ValueError("dsn is required when store is not provided")
             store = AGEGraphStore(dsn=dsn, graph_name=graph_name)
         self._store = store
+        self.domain = str(domain)
 
     def generate_decision_id(self, domain: str) -> str:
         """Generate a bare AGE decision ID; the primary owns prefix policy."""
@@ -228,7 +230,14 @@ class AGEGraphStoreAdapter:
         iks: float,
         shape: list[int],
         factor_names_hash: str,
+        quality_window_size: int | None = None,
+        quality_verified_count: int | None = None,
+        quality_correct_count: int | None = None,
+        rolling_accuracy: float | None = None,
+        quality_window_end: str | None = None,
+        quality_policy_version: str | None = None,
         metadata: dict[str, Any] | None = None,
+        decision_id: str | None = None,
     ) -> None:
         self._store.write_centroid_checkpoint(
             checkpoint_id=checkpoint_id,
@@ -241,8 +250,24 @@ class AGEGraphStoreAdapter:
             iks=iks,
             shape=shape,
             factor_names_hash=factor_names_hash,
+            quality_window_size=quality_window_size,
+            quality_verified_count=quality_verified_count,
+            quality_correct_count=quality_correct_count,
+            rolling_accuracy=rolling_accuracy,
+            quality_window_end=quality_window_end,
+            quality_policy_version=quality_policy_version,
             metadata=metadata,
+            decision_id=decision_id,
         )
+
+    def get_checkpoint_lineage(self, domain: str, checkpoint_id: str) -> dict[str, Any] | None:
+        return self._store.get_checkpoint_lineage(domain, checkpoint_id)
+
+    def get_decision_checkpoints(self, domain: str, decision_id: str) -> list[dict[str, Any]]:
+        return self._store.get_decision_checkpoints(domain, decision_id)
+
+    def backfill_snapshot_after(self, domain: str) -> dict[str, int]:
+        return self._store.ensure_snapshot_after_edges(domain)
 
     def write_evolution_event(
         self,
@@ -340,6 +365,10 @@ class AGEGraphStoreAdapter:
             delta_norm=delta_norm,
             caused_by_decision_id=caused_by_decision_id,
         )
+
+    async def run_transaction(self, operation: Callable[[Any], Any]) -> Any:
+        """Run adapter writes atomically on one AGE connection."""
+        return await self._store.run_transaction(operation)
 
     def get_centroids(self, domain: str) -> list[dict[str, object]]:
         return self._store.get_centroids(domain)
@@ -597,9 +626,15 @@ class AGEGraphStoreAdapter:
         dry_run: bool = False,
         idempotency_key: str | None = None,
     ) -> Any:
-        raise NotImplementedError(
-            "AGEGraphStoreAdapter does not support entity enrichment writes in P39A; "
-            "durable AGE enrichment is deferred"
+        return self._store.write_entity_enrichment(
+            domain=domain,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            namespace=namespace,
+            metrics=metrics,
+            computed_from=computed_from,
+            dry_run=dry_run,
+            idempotency_key=idempotency_key,
         )
 
     def read_entity_enrichment(
@@ -610,7 +645,12 @@ class AGEGraphStoreAdapter:
         entity_id: str,
         namespace: str | None = None,
     ) -> dict[str, Any]:
-        return {}
+        return self._store.read_entity_enrichment(
+            domain=domain,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            namespace=namespace,
+        )
 
     def list_entity_enrichments(
         self,
@@ -620,7 +660,12 @@ class AGEGraphStoreAdapter:
         namespace: str | None = None,
         limit: int = 500,
     ) -> list[Any]:
-        return []
+        return self._store.list_entity_enrichments(
+            domain=domain,
+            entity_type=entity_type,
+            namespace=namespace,
+            limit=limit,
+        )
 
     def close(self) -> None:
         self._store.close()

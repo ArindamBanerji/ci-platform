@@ -12,12 +12,13 @@ import threading
 import time
 import uuid
 from collections.abc import Iterable, Mapping
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Callable, Dict, List, Optional, cast
 
 import numpy as np
 
-from ci_platform.graph.age_client import AGEClient
+from ci_platform.graph.age_client import AGEClient, AGETransaction
 
 
 log = logging.getLogger(__name__)
@@ -33,6 +34,37 @@ _DK_WELFORD_VECTOR_KEYS = (
 
 VALID_DOMAINS = frozenset({"soc", "trading", "purchasing", "dataops", "s2p"})
 _SAFE_DOMAIN_RE = re.compile(r"^[a-zA-Z0-9_-]{1,200}$")
+
+
+def _normalize_created_at(value: Any) -> float:
+    """Normalize legacy ISO timestamps and current epoch timestamps."""
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            pass
+    return time.time()
+
+
+class AGEGraphStoreTransaction:
+    """Transaction-scoped write facade backed by one AGE connection."""
+
+    def __init__(self, store: "AGEGraphStore", transaction: AGETransaction) -> None:
+        self._store = store
+        self._transaction = transaction
+
+    def write_outcome(self, **kwargs: Any) -> None:
+        self._store._write_outcome_impl(transaction=self._transaction, **kwargs)
+
+    def update_centroid(self, **kwargs: Any) -> None:
+        self._store._update_centroid_impl(transaction=self._transaction, **kwargs)
+
+    def write_centroid_checkpoint(self, **kwargs: Any) -> None:
+        self._store._write_centroid_checkpoint_impl(transaction=self._transaction, **kwargs)
 
 
 class AGEGraphStore:
@@ -63,7 +95,7 @@ class AGEGraphStore:
         return result.get("value")
 
     def _S(self, value: Any) -> str:
-        return self._client._S(value)
+        return str(self._client._S(value))
 
     def _l5_props_literal(self, properties: Mapping[str, Any]) -> str:
         return "{" + ", ".join(f"{key}: {self._S(value)}" for key, value in properties.items()) + "}"
@@ -87,13 +119,13 @@ class AGEGraphStore:
         edge_target_label: str = "Decision",
         edge_target_id: dict[str, object] | None = None,
         edge_condition: bool = True,
+        transaction: AGETransaction | None = None,
     ) -> None:
         """Upsert one current-state L5 node and optionally replace its outgoing provenance edge.
 
-        This is intentionally not atomic: AGE does not give us the constraint/merge
-        primitives needed for a single-statement upsert here. If a write fails after
-        partial progress, the next write self-heals duplicate/garbled state by
-        deleting all incident edges from duplicate nodes and creating one fresh node.
+        Outside a transaction this remains self-healing rather than atomic. When a
+        transaction is supplied, every query below uses that connection and the
+        caller's commit/rollback boundary covers the complete upsert.
         """
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", label):
             raise ValueError("L5 label must be a simple Cypher label")
@@ -103,7 +135,12 @@ class AGEGraphStore:
             raise ValueError("L5 edge_target_label must be a simple Cypher label")
 
         where_clause = self._l5_where_clause("n", identity)
-        existing = self._run_query(
+        if transaction is None:
+            run_query: Callable[[str], List[Dict[str, Any]]] = self._run_query
+        else:
+            tx = transaction
+            run_query = lambda cypher: tx.run_cypher(cypher)
+        existing = run_query(
             f"""
             MATCH (n:{label})
             WHERE {where_clause}
@@ -120,14 +157,14 @@ class AGEGraphStore:
                 len(existing),
                 identity,
             )
-            self._run_query(
+            run_query(
                 f"""
                 MATCH (n:{label})-[r]-()
                 WHERE {where_clause}
                 DELETE r
                 """
             )
-            self._run_query(
+            run_query(
                 f"""
                 MATCH (n:{label})
                 WHERE {where_clause}
@@ -138,7 +175,7 @@ class AGEGraphStore:
 
         if existing:
             set_clause = self._l5_set_clause("n", properties)
-            self._run_query(
+            run_query(
                 f"""
                 MATCH (n:{label})
                 WHERE {where_clause}
@@ -147,10 +184,10 @@ class AGEGraphStore:
                 """
             )
         else:
-            self._run_query(f"CREATE (n:{label} {self._l5_props_literal(all_properties)}) RETURN n")
+            run_query(f"CREATE (n:{label} {self._l5_props_literal(all_properties)}) RETURN n")
 
         if edge_type and edge_condition:
-            self._run_query(
+            run_query(
                 f"""
                 MATCH (n:{label})-[r:{edge_type}]->()
                 WHERE {where_clause}
@@ -160,7 +197,7 @@ class AGEGraphStore:
             if edge_target_id:
                 target_where = self._l5_where_clause("t", edge_target_id)
                 try:
-                    target_rows = self._run_query(
+                    target_rows = run_query(
                         f"""
                         MATCH (t:{edge_target_label})
                         WHERE {target_where}
@@ -171,7 +208,7 @@ class AGEGraphStore:
                     if not target_rows:
                         log.warning("%s edge target not found for identity=%s", edge_type, edge_target_id)
                         return
-                    self._run_query(
+                    run_query(
                         f"""
                         MATCH (n:{label})
                         WHERE {where_clause}
@@ -184,6 +221,8 @@ class AGEGraphStore:
                         """
                     )
                 except Exception as exc:
+                    if transaction is not None:
+                        raise
                     log.warning("%s edge creation failed for identity=%s target=%s: %s", edge_type, identity, edge_target_id, exc)
 
     @staticmethod
@@ -543,6 +582,15 @@ class AGEGraphStore:
     def _run_query(self, cypher: str) -> List[Dict[str, Any]]:
         return self._run(self._client.run_query(cypher, None)) or []
 
+    async def run_transaction(
+        self,
+        operation: Callable[["AGEGraphStoreTransaction"], Any],
+    ) -> Any:
+        """Run GraphStore writes on one committed or rolled-back AGE connection."""
+        return await self._client.run_transaction(
+            lambda transaction: operation(AGEGraphStoreTransaction(self, transaction))
+        )
+
     @staticmethod
     def _validated_domain(domain: str) -> str:
         if not isinstance(domain, str) or not _SAFE_DOMAIN_RE.fullmatch(domain):
@@ -676,7 +724,7 @@ class AGEGraphStore:
         factor_values_json = json.dumps(factor_values, sort_keys=True)
         factor_names_hash = hashlib.sha256(factor_names_json.encode("utf-8")).hexdigest()
         shape_json = json.dumps([len(factor_values)])
-        created_at = datetime.now(timezone.utc).isoformat()
+        created_at = time.time()
         props = (
             "{"
             f"vector_id: {self._S(vector_id)}, "
@@ -901,6 +949,42 @@ class AGEGraphStore:
         recommended_action: Optional[str] = None,
         was_override: Optional[bool] = None,
     ) -> None:
+        self._write_outcome_impl(
+            decision_id=decision_id,
+            actual_action=actual_action,
+            is_correct=is_correct,
+            metadata=metadata,
+            domain=domain,
+            outcome=outcome,
+            verified_at_epoch=verified_at_epoch,
+            quality_signal=quality_signal,
+            override_comment=override_comment,
+            verified_by=verified_by,
+            analyst_action=analyst_action,
+            final_action=final_action,
+            recommended_action=recommended_action,
+            was_override=was_override,
+        )
+
+    def _write_outcome_impl(
+        self,
+        decision_id: str,
+        actual_action: str,
+        is_correct: bool,
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        domain: str,
+        outcome: Optional[str] = None,
+        verified_at_epoch: Optional[float] = None,
+        quality_signal: Optional[float] = None,
+        override_comment: Optional[str] = None,
+        verified_by: Optional[str] = None,
+        analyst_action: Optional[str] = None,
+        final_action: Optional[str] = None,
+        recommended_action: Optional[str] = None,
+        was_override: Optional[bool] = None,
+        transaction: AGETransaction | None = None,
+    ) -> None:
         metadata_dict = dict(metadata or {})
         actual_index = int(metadata_dict.get("actual_index", 0))
         reward = float(metadata_dict.get("reward", 0.0))
@@ -968,16 +1052,40 @@ class AGEGraphStore:
         }}]->(o)
         RETURN d.status AS status, o AS o
         """
-        rows = self._run_query(query)
+        if transaction is None:
+            run_query: Callable[[str], List[Dict[str, Any]]] = self._run_query
+        else:
+            tx = transaction
+            run_query = lambda cypher: tx.run_cypher(cypher)
+        rows = run_query(query)
         if rows:
             return
-        self._raise_write_outcome_no_row(decision_id, domain=domain)
+        self._raise_write_outcome_no_row(
+            decision_id,
+            domain=domain,
+            actual_action=actual_action,
+            is_correct=is_correct,
+            transaction=transaction,
+        )
 
-    def _raise_write_outcome_no_row(self, decision_id: str, *, domain: str) -> None:
+    def _raise_write_outcome_no_row(
+        self,
+        decision_id: str,
+        *,
+        domain: str,
+        actual_action: str,
+        is_correct: bool,
+        transaction: AGETransaction | None = None,
+    ) -> None:
+        if transaction is None:
+            run_query: Callable[[str], List[Dict[str, Any]]] = self._run_query
+        else:
+            tx = transaction
+            run_query = lambda cypher: tx.run_cypher(cypher)
         domain_literal = self._S(self._validated_domain(domain))
         decision_domain_where = f"WHERE d.domain = {domain_literal}"
         outcome_pattern = f"{{decision_id: {self._S(decision_id)}, domain: {domain_literal}}}"
-        decision_rows = self._run_query(
+        decision_rows = run_query(
             f"""
             MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
             {decision_domain_where}
@@ -987,7 +1095,7 @@ class AGEGraphStore:
         )
         if not decision_rows:
             raise KeyError(decision_id)
-        linked_rows = self._run_query(
+        linked_rows = run_query(
             f"""
             MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
             {decision_domain_where}
@@ -995,7 +1103,7 @@ class AGEGraphStore:
             RETURN count(linked) AS cnt
             """
         )
-        standalone_rows = self._run_query(
+        standalone_rows = run_query(
             f"""
             MATCH (o:Outcome {outcome_pattern})
             RETURN count(o) AS cnt
@@ -1003,12 +1111,58 @@ class AGEGraphStore:
         )
         linked_count = self._int_from_rows(linked_rows, "cnt")
         standalone_count = self._int_from_rows(standalone_rows, "cnt")
-        if linked_count > 0 or standalone_count > 0:
-            raise ValueError(f"outcome already exists for decision_id: {decision_id}")
+        if linked_count > 0:
+            existing_rows = run_query(
+                f"""
+                MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
+                {decision_domain_where}
+                MATCH (d)-[:HAS_OUTCOME]->(linked:Outcome)
+                RETURN linked.actual_action AS actual_action, linked.is_correct AS is_correct
+                LIMIT 1
+                """
+            )
+            if existing_rows and self._same_outcome(
+                existing_rows[0], actual_action=actual_action, is_correct=is_correct
+            ):
+                return
+            raise ValueError(f"outcome already exists with a different action for decision_id: {decision_id}")
+        if standalone_count > 0:
+            existing_rows = run_query(
+                f"""
+                MATCH (o:Outcome {outcome_pattern})
+                RETURN o.actual_action AS actual_action, o.is_correct AS is_correct
+                LIMIT 1
+                """
+            )
+            if existing_rows and self._same_outcome(
+                existing_rows[0], actual_action=actual_action, is_correct=is_correct
+            ):
+                return
+            raise ValueError(f"outcome already exists with a different action for decision_id: {decision_id}")
         status = decision_rows[0].get("status")
         if status != "pending":
             raise ValueError(f"decision status is not pending for decision_id: {decision_id}")
         raise RuntimeError(f"AGE write_outcome returned no rows for decision_id: {decision_id}")
+
+    @staticmethod
+    def _same_outcome(
+        row: Dict[str, Any],
+        *,
+        actual_action: str,
+        is_correct: bool,
+    ) -> bool:
+        existing_action = row.get("actual_action")
+        existing_correct = row.get("is_correct")
+        if existing_action is None or str(existing_action) != str(actual_action):
+            return False
+        if existing_correct is None:
+            return True
+        normalized_correct = (
+            existing_correct
+            if isinstance(existing_correct, bool)
+            else str(existing_correct).casefold() == "true"
+        )
+        return normalized_correct == bool(is_correct)
 
     def write_observation(
         self,
@@ -1106,9 +1260,15 @@ class AGEGraphStore:
         decision_id: str,
         checkpoint_id: str,
         domain: str,
+        transaction: AGETransaction | None = None,
     ) -> None:
         domain = str(domain)
-        self._run_query(
+        if transaction is None:
+            run_query: Callable[[str], List[Dict[str, Any]]] = self._run_query
+        else:
+            tx = transaction
+            run_query = lambda cypher: tx.run_cypher(cypher)
+        run_query(
             f"""
             MATCH (d:Decision {{decision_id: {self._S(str(decision_id))}}})
             MATCH (c:CentroidCheckpoint {{checkpoint_id: {self._S(str(checkpoint_id))}}})
@@ -1365,8 +1525,57 @@ class AGEGraphStore:
         iks: float,
         shape: List[int],
         factor_names_hash: str,
+        quality_window_size: Optional[int] = None,
+        quality_verified_count: Optional[int] = None,
+        quality_correct_count: Optional[int] = None,
+        rolling_accuracy: Optional[float] = None,
+        quality_window_end: Optional[str] = None,
+        quality_policy_version: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         decision_id: Optional[str] = None,
+    ) -> None:
+        self._write_centroid_checkpoint_impl(
+            checkpoint_id=checkpoint_id,
+            domain=domain,
+            category=category,
+            action=action,
+            centroids=centroids,
+            decisions_count=decisions_count,
+            verified_count=verified_count,
+            iks=iks,
+            shape=shape,
+            factor_names_hash=factor_names_hash,
+            quality_window_size=quality_window_size,
+            quality_verified_count=quality_verified_count,
+            quality_correct_count=quality_correct_count,
+            rolling_accuracy=rolling_accuracy,
+            quality_window_end=quality_window_end,
+            quality_policy_version=quality_policy_version,
+            metadata=metadata,
+            decision_id=decision_id,
+        )
+
+    def _write_centroid_checkpoint_impl(
+        self,
+        checkpoint_id: str,
+        domain: str,
+        category: str,
+        action: str,
+        centroids: Any,
+        decisions_count: int,
+        verified_count: int,
+        iks: float,
+        shape: List[int],
+        factor_names_hash: str,
+        quality_window_size: Optional[int] = None,
+        quality_verified_count: Optional[int] = None,
+        quality_correct_count: Optional[int] = None,
+        rolling_accuracy: Optional[float] = None,
+        quality_window_end: Optional[str] = None,
+        quality_policy_version: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        decision_id: Optional[str] = None,
+        transaction: AGETransaction | None = None,
     ) -> None:
         if hasattr(centroids, "tolist"):
             centroids = centroids.tolist()
@@ -1383,10 +1592,17 @@ class AGEGraphStore:
             "iks": float(iks),
             "shape_json": json.dumps([int(value) for value in shape], sort_keys=True),
             "factor_names_hash": str(factor_names_hash),
+            "quality_window_size": quality_window_size,
+            "quality_verified_count": quality_verified_count,
+            "quality_correct_count": quality_correct_count,
+            "rolling_accuracy": rolling_accuracy,
+            "quality_window_end": quality_window_end,
+            "quality_policy_version": quality_policy_version,
             "metadata_json": json.dumps(metadata, sort_keys=True),
+            "decision_id": decision_id,
         }
         existing = self._get_centroid_checkpoint_payload(
-            str(checkpoint_id), domain=str(domain)
+            str(checkpoint_id), domain=str(domain), transaction=transaction
         )
         if existing is not None:
             if existing == payload:
@@ -1395,6 +1611,7 @@ class AGEGraphStore:
                         decision_id=decision_id,
                         checkpoint_id=str(checkpoint_id),
                         domain=str(domain),
+                        transaction=transaction,
                     )
                 return
             raise ValueError(f"conflicting checkpoint_id: {checkpoint_id}")
@@ -1412,24 +1629,46 @@ class AGEGraphStore:
             f"iks: {payload['iks']}, "
             f"shape: {self._S(payload['shape_json'])}, "
             f"factor_names_hash: {self._S(payload['factor_names_hash'])}, "
+            f"quality_window_size: {self._S(payload['quality_window_size'])}, "
+            f"quality_verified_count: {self._S(payload['quality_verified_count'])}, "
+            f"quality_correct_count: {self._S(payload['quality_correct_count'])}, "
+            f"rolling_accuracy: {self._S(payload['rolling_accuracy'])}, "
+            f"quality_window_end: {self._S(payload['quality_window_end'])}, "
+            f"quality_policy_version: {self._S(payload['quality_policy_version'])}, "
             f"metadata: {self._S(payload['metadata_json'])}, "
+            f"decision_id: {self._S(payload['decision_id'])}, "
             "schema_version: 'protocol_v2', "
             f"created_at: {float(created_at)}"
             "}"
         )
-        self._run_query(f"CREATE (c:CentroidCheckpoint {props}) RETURN c")
+        if transaction is None:
+            run_query: Callable[[str], List[Dict[str, Any]]] = self._run_query
+        else:
+            tx = transaction
+            run_query = lambda cypher: tx.run_cypher(cypher)
+        run_query(f"CREATE (c:CentroidCheckpoint {props}) RETURN c")
         if decision_id:
             self._link_checkpoint_edges(
                 decision_id=decision_id,
                 checkpoint_id=str(checkpoint_id),
                 domain=str(domain),
+                transaction=transaction,
             )
 
     def _get_centroid_checkpoint_payload(
-        self, checkpoint_id: str, *, domain: str
+        self,
+        checkpoint_id: str,
+        *,
+        domain: str,
+        transaction: AGETransaction | None = None,
     ) -> Optional[Dict[str, Any]]:
         domain_literal = self._S(self._validated_domain(domain))
-        rows = self._run_query(
+        if transaction is None:
+            run_query: Callable[[str], List[Dict[str, Any]]] = self._run_query
+        else:
+            tx = transaction
+            run_query = lambda cypher: tx.run_cypher(cypher)
+        rows = run_query(
             f"""
             MATCH (c:CentroidCheckpoint {{checkpoint_id: {self._S(checkpoint_id)}}})
             WHERE c.domain = {domain_literal}
@@ -1454,8 +1693,111 @@ class AGEGraphStore:
             "iks": self._as_float(node.get("iks")),
             "shape_json": json.dumps(shape, sort_keys=True),
             "factor_names_hash": str(node.get("factor_names_hash")),
+            "quality_window_size": (
+                self._as_int(node.get("quality_window_size"))
+                if node.get("quality_window_size") is not None
+                else None
+            ),
+            "quality_verified_count": (
+                self._as_int(node.get("quality_verified_count"))
+                if node.get("quality_verified_count") is not None
+                else None
+            ),
+            "quality_correct_count": (
+                self._as_int(node.get("quality_correct_count"))
+                if node.get("quality_correct_count") is not None
+                else None
+            ),
+            "rolling_accuracy": (
+                self._as_float(node.get("rolling_accuracy"))
+                if node.get("rolling_accuracy") is not None
+                else None
+            ),
+            "quality_window_end": node.get("quality_window_end"),
+            "quality_policy_version": node.get("quality_policy_version"),
             "metadata_json": json.dumps(metadata, sort_keys=True),
+            "decision_id": node.get("decision_id") or metadata.get("decision_id"),
         }
+
+    def get_checkpoint_lineage(
+        self, domain: str, checkpoint_id: str
+    ) -> Optional[Dict[str, Any]]:
+        domain = self._validated_domain(domain)
+        rows = self._run_query(
+            f"""
+            MATCH (d:Decision)-[:SNAPSHOT_AFTER]->(c:CentroidCheckpoint)
+            WHERE c.checkpoint_id = {self._S(str(checkpoint_id))}
+              AND c.domain = {self._S(domain)}
+              AND d.domain = {self._S(domain)}
+            RETURN d
+            LIMIT 1
+            """
+        )
+        if not rows:
+            return None
+        return self._node_to_dict(rows[0].get("d", rows[0]))
+
+    def get_decision_checkpoints(
+        self, domain: str, decision_id: str
+    ) -> List[Dict[str, Any]]:
+        domain = self._validated_domain(domain)
+        rows = self._run_query(
+            f"""
+            MATCH (d:Decision)-[:SNAPSHOT_AFTER]->(c:CentroidCheckpoint)
+            WHERE d.decision_id = {self._S(str(decision_id))}
+              AND d.domain = {self._S(domain)}
+              AND c.domain = {self._S(domain)}
+            RETURN c
+            ORDER BY c.created_at ASC
+            """
+        )
+        return [
+            self._node_to_dict(row.get("c", row))
+            for row in rows
+        ]
+
+    def ensure_snapshot_after_edges(self, domain: str) -> Dict[str, int]:
+        """Ensure missing checkpoint edges exist without creating duplicates."""
+        domain = self._validated_domain(domain)
+        rows = self._run_query(
+            f"""
+            MATCH (c:CentroidCheckpoint)
+            WHERE c.domain = {self._S(domain)}
+              AND c.schema_version = 'protocol_v2'
+            RETURN c
+            """
+        )
+        report = {"scanned": 0, "created": 0, "skipped": 0, "missing_decision": 0}
+        for row in rows:
+            checkpoint = self._node_to_dict(row.get("c", row))
+            decision_id = checkpoint.get("decision_id") or (checkpoint.get("metadata") or {}).get("decision_id")
+            if not decision_id or not checkpoint.get("checkpoint_id"):
+                continue
+            report["scanned"] += 1
+            edge_rows = self._run_query(
+                f"""
+                MATCH (d:Decision)-[r:SNAPSHOT_AFTER]->(c:CentroidCheckpoint)
+                WHERE d.decision_id = {self._S(str(decision_id))}
+                  AND d.domain = {self._S(domain)}
+                  AND c.checkpoint_id = {self._S(str(checkpoint['checkpoint_id']))}
+                  AND c.domain = {self._S(domain)}
+                RETURN count(r) AS cnt
+                """
+            )
+            if self._int_from_rows(edge_rows, "cnt"):
+                report["skipped"] += 1
+                continue
+            decision = self.get_decision(str(decision_id), domain)
+            if decision is None:
+                report["missing_decision"] += 1
+                continue
+            self._link_checkpoint_edges(
+                decision_id=str(decision_id),
+                checkpoint_id=str(checkpoint["checkpoint_id"]),
+                domain=domain,
+            )
+            report["created"] += 1
+        return report
 
     @staticmethod
     def _json_field_value(value: Any) -> Any:
@@ -1851,6 +2193,7 @@ class AGEGraphStore:
         props = (
             "{"
             f"pattern_id: {self._S(payload['pattern_id'])}, "
+            f"domain: {self._S(payload['target_domain'])}, "
             f"source_domain: {self._S(payload['source_domain'])}, "
             f"target_domain: {self._S(payload['target_domain'])}, "
             f"pattern_type: {self._S(payload['pattern_type'])}, "
@@ -1915,9 +2258,9 @@ class AGEGraphStore:
         if domains is not None:
             if not domains:
                 return []
-            domain_clause = "AND d.domain_id IN (" + ", ".join(
+            domain_clause = "AND d.domain_id IN [" + ", ".join(
                 self._S(str(domain)) for domain in domains
-            ) + ")"
+            ) + "]"
         rows = self._run_query(
             f"""
             MATCH (cs:ConservationStatus)-[:SUMMARIZES_DOMAIN]->(d:Domain)
@@ -2223,6 +2566,25 @@ class AGEGraphStore:
         delta_norm: float,
         caused_by_decision_id: str | None = None,
     ) -> None:
+        self._update_centroid_impl(
+            domain=domain,
+            category=category,
+            action=action,
+            centroid_vector=centroid_vector,
+            delta_norm=delta_norm,
+            caused_by_decision_id=caused_by_decision_id,
+        )
+
+    def _update_centroid_impl(
+        self,
+        domain: str,
+        category: str,
+        action: str,
+        centroid_vector: List[float],
+        delta_norm: float,
+        caused_by_decision_id: str | None = None,
+        transaction: AGETransaction | None = None,
+    ) -> None:
         domain_value = str(domain)
         category_value = str(category)
         action_value = str(action)
@@ -2251,6 +2613,7 @@ class AGEGraphStore:
                 else None
             ),
             edge_condition=True,
+            transaction=transaction,
         )
 
     def get_centroids(self, domain: str) -> List[Dict[str, object]]:
@@ -2630,7 +2993,7 @@ class AGEGraphStore:
             centroids = centroids.tolist()
         centroids_json = json.dumps(centroids, sort_keys=True)
         metadata_json = json.dumps(metadata or {}, sort_keys=True)
-        created_at = datetime.now(timezone.utc).isoformat()
+        created_at = time.time()
         props = (
             "{"
             f"decision_id: {self._S(decision_id)}, "
@@ -2659,23 +3022,27 @@ class AGEGraphStore:
         self._run_query(f"CREATE (c:CentroidCheckpoint {props}) RETURN c")
 
     def load_latest_centroids(self, domain: str) -> Any | None:
-        rows = self._run_query(
-            f"""
-            MATCH (c:CentroidCheckpoint)
-            WHERE c.domain = {self._S(domain)}
-              AND c.checkpoint_id IS NULL
-            RETURN c
-            ORDER BY c.created_at DESC
-            LIMIT 1
-            """
+        checkpoints = self.get_centroid_checkpoints(
+            domain,
+            include_v2=True,
+            limit=None,
         )
-        if not rows:
+        if not checkpoints:
             return None
-        checkpoint = self._node_to_dict(rows[0].get("c", rows[0]))
+        checkpoint = max(
+            checkpoints,
+            key=lambda item: float(item.get("created_at", 0.0)),
+        )
         centroids = checkpoint.get("centroids")
         if centroids is None:
             return None
-        return np.asarray(centroids, dtype=np.float64)
+        try:
+            value = np.asarray(centroids, dtype=np.float64)
+        except (TypeError, ValueError):
+            # A checkpoint payload may be readable history metadata without
+            # being a numeric centroid tensor. It must not poison startup.
+            return None
+        return value if value.ndim > 0 else None
 
     def save_evolution_event(
         self,
@@ -2838,19 +3205,60 @@ class AGEGraphStore:
         **kwargs: Any,
     ) -> List[Dict[str, Any]]:
         limit = kwargs.pop("limit", 50)
-        limit_value = self._safe_limit(limit, default=50)
+        limit_clause = "" if limit is None else f"LIMIT {self._safe_limit(limit, default=50)}"
+        order_clause = "" if limit is None else "ORDER BY c.created_at DESC"
         rows = self._run_query(
             f"""
             MATCH (c:CentroidCheckpoint)
             WHERE c.domain = {self._S(domain)}
               AND ({"TRUE" if include_v2 else "c.checkpoint_id IS NULL"})
             RETURN c
-            ORDER BY c.created_at DESC
-            LIMIT {limit_value}
+            {order_clause}
+            {limit_clause}
             """
         )
-        checkpoints = [self._node_to_dict(row.get("c", row)) for row in rows]
-        return list(reversed(checkpoints))
+        checkpoints = []
+        for row in rows:
+            checkpoint = self._node_to_dict(row.get("c", row))
+            if "created_at" in checkpoint:
+                checkpoint["created_at"] = _normalize_created_at(
+                    checkpoint.get("created_at")
+                )
+            checkpoints.append(checkpoint)
+        checkpoints.sort(
+            key=lambda item: float(item.get("created_at", 0.0)),
+            reverse=limit is None,
+        )
+        if limit is None:
+            return checkpoints
+        return checkpoints[-max(int(limit), 0):]
+
+    def load_latest_checkpoint_for_regime(
+        self, domain: str, regime_tag: str
+    ) -> Dict[str, Any] | None:
+        checkpoints = self.get_centroid_checkpoints(
+            str(domain), include_v2=True, limit=None
+        )
+        matching = [
+            checkpoint
+            for checkpoint in checkpoints
+            if str((checkpoint.get("metadata") or {}).get("regime_tag") or "")
+            == str(regime_tag)
+        ]
+        if not matching:
+            return None
+        return max(
+            enumerate(matching),
+            key=lambda item: (
+                float(
+                    item[1].get(
+                        "created_at_epoch", item[1].get("created_at", 0.0)
+                    )
+                    or 0.0
+                ),
+                item[0],
+            ),
+        )[1]
 
     def get_evolution_events(self, domain: str, **kwargs: Any) -> List[Dict[str, Any]]:
         limit = self._safe_limit(kwargs.pop("limit", 100), default=100)
@@ -3207,6 +3615,7 @@ class AGEGraphStore:
                 "factor_names",
                 "factor_mapping",
                 "probabilities",
+                "shape",
             ):
                 if isinstance(node.get(key), str):
                     try:
@@ -3252,9 +3661,103 @@ class AGEGraphStore:
         dry_run: bool = False,
         idempotency_key: str | None = None,
     ) -> Any:
-        raise NotImplementedError(
-            "AGEGraphStore does not support entity enrichment writes in P39A; "
-            "durable AGE enrichment is deferred"
+        from copilot_sdk.graph.enrichment import (
+            EntityEnrichmentReceipt,
+            is_protected_metric_name,
+        )
+
+        domain = str(domain)
+        entity_type = str(entity_type)
+        entity_id = str(entity_id)
+        namespace = str(namespace)
+        computed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        allowed: dict[str, Any] = {}
+        protected: list[str] = []
+        rejected: list[str] = []
+        warnings: list[str] = []
+        for metric_name, value in dict(metrics or {}).items():
+            metric_key = str(metric_name)
+            if is_protected_metric_name(metric_key):
+                protected.append(metric_key)
+                rejected.append(metric_key)
+                continue
+            if not hasattr(value, "to_storage_dict") or not hasattr(value, "value"):
+                raise TypeError("metrics values must be ProvenancedValue instances")
+            allowed[metric_key] = value
+
+        if protected:
+            warnings.append("protected metric names were rejected")
+        receipt_kwargs = {
+            "domain": domain,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "namespace": namespace,
+            "metrics_rejected": rejected,
+            "protected_fields_rejected": protected,
+            "idempotency_key": str(idempotency_key or ""),
+            "computed_at": computed_at,
+            "warnings": warnings,
+        }
+        if not allowed:
+            warnings.append("no enrichment metrics were written")
+            return EntityEnrichmentReceipt(
+                **receipt_kwargs,
+                persisted=False,
+                dry_run=bool(dry_run),
+                metrics_written=[],
+            )
+        if dry_run:
+            return EntityEnrichmentReceipt(
+                **receipt_kwargs,
+                persisted=False,
+                dry_run=True,
+                metrics_written=list(allowed),
+            )
+
+        source_set = (
+            asdict(computed_from)
+            if is_dataclass(computed_from)
+            else dict(computed_from or {})
+        )
+        domain_literal = self._S(domain)
+        entity_type_literal = self._S(entity_type)
+        entity_id_literal = self._S(entity_id)
+        namespace_literal = self._S(namespace)
+        for metric_name, value in allowed.items():
+            metric_literal = self._S(metric_name)
+            self._run_query(
+                f"""
+                MATCH (e:EntityEnrichment)
+                WHERE e.domain = {domain_literal}
+                  AND e.entity_type = {entity_type_literal}
+                  AND e.entity_id = {entity_id_literal}
+                  AND e.namespace = {namespace_literal}
+                  AND e.metric_name = {metric_literal}
+                DELETE e
+                """
+            )
+            self._run_query(
+                f"""
+                CREATE (e:EntityEnrichment {{
+                    domain: {domain_literal},
+                    entity_type: {entity_type_literal},
+                    entity_id: {entity_id_literal},
+                    namespace: {namespace_literal},
+                    metric_name: {metric_literal},
+                    value_json: {self._S(json.dumps(value.value, sort_keys=True))},
+                    provenance_json: {self._S(json.dumps(value.to_storage_dict(), sort_keys=True))},
+                    source_set_json: {self._S(json.dumps(source_set, sort_keys=True))},
+                    computed_at: {self._S(computed_at)},
+                    idempotency_key: {self._S(str(idempotency_key or ""))}
+                }})
+                RETURN e
+                """
+            )
+        return EntityEnrichmentReceipt(
+            **receipt_kwargs,
+            persisted=True,
+            dry_run=False,
+            metrics_written=list(allowed),
         )
 
     def read_entity_enrichment(
@@ -3265,7 +3768,35 @@ class AGEGraphStore:
         entity_id: str,
         namespace: str | None = None,
     ) -> Dict[str, Any]:
-        return {}
+        from copilot_sdk.graph.enrichment import ProvenancedValue
+
+        filters = [
+            f"e.domain = {self._S(str(domain))}",
+            f"e.entity_type = {self._S(str(entity_type))}",
+            f"e.entity_id = {self._S(str(entity_id))}",
+        ]
+        if namespace is not None:
+            filters.append(f"e.namespace = {self._S(str(namespace))}")
+        rows = self._run_query(
+            "MATCH (e:EntityEnrichment) WHERE "
+            + " AND ".join(filters)
+            + " RETURN e ORDER BY e.namespace, e.metric_name"
+        )
+        result: Dict[str, Any] = {}
+        for row in rows:
+            node = self._node_to_dict(row.get("e", row))
+            try:
+                value = json.loads(str(node.get("value_json", "null")))
+                metadata = json.loads(str(node.get("provenance_json", "{}")))
+                key = (
+                    str(node.get("metric_name"))
+                    if namespace is not None
+                    else f"{node.get('namespace')}.{node.get('metric_name')}"
+                )
+                result[key] = ProvenancedValue.from_storage_dict(value, metadata)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                log.warning("Skipping malformed AGE entity enrichment row: %r", node)
+        return result
 
     def list_entity_enrichments(
         self,
@@ -3275,7 +3806,45 @@ class AGEGraphStore:
         namespace: str | None = None,
         limit: int = 500,
     ) -> List[Any]:
-        return []
+        from copilot_sdk.graph.enrichment import EntityEnrichmentRecord, EnrichmentSourceSet, ProvenancedValue
+
+        filters = [f"e.domain = {self._S(str(domain))}"]
+        if entity_type is not None:
+            filters.append(f"e.entity_type = {self._S(str(entity_type))}")
+        if namespace is not None:
+            filters.append(f"e.namespace = {self._S(str(namespace))}")
+        rows = self._run_query(
+            "MATCH (e:EntityEnrichment) WHERE "
+            + " AND ".join(filters)
+            + f" RETURN e ORDER BY e.entity_id, e.namespace, e.metric_name LIMIT {max(0, int(limit))}"
+        )
+        records: List[Any] = []
+        for row in rows:
+            node = self._node_to_dict(row.get("e", row))
+            try:
+                value = ProvenancedValue.from_storage_dict(
+                    json.loads(str(node.get("value_json", "null"))),
+                    json.loads(str(node.get("provenance_json", "{}"))),
+                )
+                source_set = EnrichmentSourceSet(
+                    **json.loads(str(node.get("source_set_json", "{}")))
+                )
+                records.append(
+                    EntityEnrichmentRecord(
+                        domain=str(node.get("domain", domain)),
+                        entity_type=str(node.get("entity_type", entity_type or "")),
+                        entity_id=str(node.get("entity_id", "")),
+                        namespace=str(node.get("namespace", "")),
+                        metric_name=str(node.get("metric_name", "")),
+                        value=value,
+                        computed_from=source_set,
+                        computed_at=str(node.get("computed_at", "")),
+                        idempotency_key=str(node.get("idempotency_key", "")),
+                    )
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                log.warning("Skipping malformed AGE entity enrichment row: %r", node)
+        return records
 
     @staticmethod
     def _int_from_rows(rows: List[Dict[str, Any]], key: str) -> int:

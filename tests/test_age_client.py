@@ -123,12 +123,107 @@ def test_age_client_pooled_mode_uses_psycopg_pool_when_available(monkeypatch):
     pool = FakePool.instances[0]
     assert pool.kwargs["min_size"] == 1
     assert pool.kwargs["max_size"] == 2
+    assert pool.kwargs["max_idle"] == 60
+    assert pool.kwargs["max_lifetime"] == 300
+    assert pool.kwargs["reconnect_timeout"] == 300
+    assert callable(pool.kwargs["reconnect_failed"])
     assert pool.kwargs["kwargs"]["autocommit"] is True
     calls = [call[0][0] for call in pool.conn.execute.call_args_list]
     assert calls[0] == "LOAD 'age'"
     assert calls[1].startswith("SET search_path")
     assert any(str(sql).startswith("SELECT * FROM cypher") for sql in calls)
     assert pool.closed is True
+
+
+class _ProbeConnection:
+    def __init__(self, identifier):
+        self.identifier = identifier
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class _ProbeConnectionContext:
+    def __init__(self, pool, connection):
+        self.pool = pool
+        self.connection_value = connection
+
+    def __enter__(self):
+        return self.connection_value
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.pool.active -= 1
+        if not self.connection_value.closed:
+            self.pool.idle.append(self.connection_value)
+
+
+class _ProbePool:
+    def __init__(self, max_size=2):
+        self.max_size = max_size
+        self.active = 0
+        self.created = 0
+        self.idle = []
+        self.closed = False
+
+    def connection(self):
+        if self.active >= self.max_size:
+            raise RuntimeError("pool exhausted")
+        self.active += 1
+        if self.idle:
+            connection = self.idle.pop()
+        else:
+            self.created += 1
+            connection = _ProbeConnection(self.created)
+        return _ProbeConnectionContext(self, connection)
+
+    def close(self):
+        self.closed = True
+
+
+def test_pool_connection_reuse():
+    pool = _ProbePool(max_size=2)
+    with pool.connection() as first:
+        first_id = first.identifier
+    with pool.connection() as second:
+        assert second.identifier == first_id
+
+
+def test_pool_max_size():
+    pool = _ProbePool(max_size=2)
+    first = pool.connection()
+    second = pool.connection()
+    first.__enter__()
+    second.__enter__()
+    try:
+        with pytest.raises(RuntimeError, match="pool exhausted"):
+            pool.connection()
+    finally:
+        first.__exit__(None, None, None)
+        second.__exit__(None, None, None)
+
+
+def test_pool_recovery_after_disconnect():
+    pool = _ProbePool(max_size=1)
+    with pool.connection() as first:
+        first.close()
+    with pool.connection() as recovered:
+        assert recovered.closed is False
+        assert recovered.identifier != first.identifier
+
+
+def test_pool_cleanup_on_shutdown():
+    pool = _ProbePool(max_size=1)
+    from ci_platform.graph.age_client import AGEClient
+
+    client = AGEClient.__new__(AGEClient)
+    client._pool = pool
+    client._warm_conn = None
+    client._closed = False
+    client._sync_close()
+
+    assert pool.closed is True
+    assert client._pool is None
 
 
 def test_extract_columns_simple():

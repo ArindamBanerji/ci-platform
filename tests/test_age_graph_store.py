@@ -388,6 +388,59 @@ def test_write_outcome_still_rejects_non_pending_or_missing_status(fake_age_clie
     assert "AND d.status = 'pending'" in queries[0]
 
 
+def test_write_outcome_idempotent_for_same_resolution(fake_age_client):
+    store = _new_store(fake_age_client)
+    store.write_decision(
+        "soc",
+        category="duplicate_risk",
+        action="confirm",
+        confidence=0.8,
+        factors={},
+        metadata={"decision_id": "d1"},
+    )
+    client = FakeAGEClient.instances[0]
+    client.responses.append([{"status": "confirmed", "o": {}}])
+    store.write_outcome("d1", "confirm", True, domain="soc")
+    client.responses.extend(
+        [
+            [],
+            [{"status": "confirmed"}],
+            [{"cnt": 1}],
+            [{"cnt": 0}],
+            [{"actual_action": "confirm", "is_correct": True}],
+        ]
+    )
+
+    store.write_outcome("d1", "confirm", True, domain="soc")
+
+
+def test_write_outcome_rejects_conflicting_resolution(fake_age_client):
+    store = _new_store(fake_age_client)
+    store.write_decision(
+        "soc",
+        category="duplicate_risk",
+        action="confirm",
+        confidence=0.8,
+        factors={},
+        metadata={"decision_id": "d2"},
+    )
+    client = FakeAGEClient.instances[0]
+    client.responses.append([{"status": "confirmed", "o": {}}])
+    store.write_outcome("d2", "confirm", True, domain="soc")
+    client.responses.extend(
+        [
+            [],
+            [{"status": "confirmed"}],
+            [{"cnt": 1}],
+            [{"cnt": 0}],
+            [{"actual_action": "confirm", "is_correct": True}],
+        ]
+    )
+
+    with pytest.raises(ValueError, match="different action"):
+        store.write_outcome("d2", "override", False, domain="soc")
+
+
 def test_no_existing_decision_backfill_or_migration(fake_age_client):
     import ci_platform.graph.age_graph_store as age_graph_store
 

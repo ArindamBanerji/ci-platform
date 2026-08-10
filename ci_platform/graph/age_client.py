@@ -5,7 +5,7 @@ Apache AGE runs openCypher on PostgreSQL.
 All copilots (SOC, S2P, fraud, etc.) import from here.
 Never duplicate the graph client in domain repos.
 
-Key AGE dialect differences from Neo4j:
+Key AGE dialect differences from AGE:
   - Queries wrapped in: SELECT * FROM cypher('graph', $$ ... $$) AS (col agtype)
   - Parameters: $name in Cypher body, passed as dict → converted to %s positional
   - Cypher datetime/duration functions NOT supported → use Python datetime/timedelta
@@ -16,7 +16,7 @@ Connection model:
   - Default: sync psycopg.connect() per query, executed in asyncio.to_thread()
   - Opt-in: pooled AGE connections when psycopg_pool is available
   - Opt-in fallback: serialized warm connection reuse when psycopg_pool is absent
-  - All public methods are async (interface parity with Neo4jClient)
+  - All public methods are async (interface parity with GraphClient)
 
 Connection configuration is supplied explicitly by callers. Domain services
 resolve DSN and graph through GraphConfig before constructing this client.
@@ -49,6 +49,11 @@ def _with_sslmode_disabled(dsn: str) -> str:
 
 
 _PSYCOPG_POOL_AVAILABLE = importlib.util.find_spec("psycopg_pool") is not None
+
+
+def _pool_reconnect_failed(pool: Any) -> None:
+    """Log an exhausted pool reconnect attempt without changing query behavior."""
+    logger.error("AGE connection pool could not reconnect after the configured timeout")
 
 _DESTRUCTIVE_SET_RE = re.compile(r'\bSET\s+(\w+)\s*=\s*\{')
 _MERGE_RE = re.compile(r'\bMERGE\s*\(', re.IGNORECASE)
@@ -99,7 +104,7 @@ def _check_safe_cypher(cypher: str) -> None:
 class AGEClient:
     """
     Sync-core graph client for Apache AGE / PostgreSQL.
-    Drop-in interface replacement for Neo4jClient.
+    Drop-in interface replacement for GraphClient.
 
     All domain copilots (SOC, S2P) use this via:
         from ci_platform.graph import get_graph_client
@@ -139,19 +144,19 @@ class AGEClient:
         else:
             self._connection_mode = "warm_fallback"
 
-    # ── interface parity (Neo4jClient) ────────────────────────────────────────
+    # ── interface parity (GraphClient) ────────────────────────────────────────
 
     async def connect(self) -> None:
         """
         Initialize opt-in pooled/warm connection resources.
-        Fresh mode remains a no-op for Neo4jClient interface parity.
+        Fresh mode remains a no-op for GraphClient interface parity.
         """
         await asyncio.to_thread(self._sync_connect)
 
     async def close(self) -> None:
         """
         Close opt-in pooled/warm connection resources.
-        Fresh mode remains a no-op for Neo4jClient interface parity.
+        Fresh mode remains a no-op for GraphClient interface parity.
         """
         await asyncio.to_thread(self._sync_close)
 
@@ -187,6 +192,10 @@ class AGEClient:
                     max_size=getattr(self, "_pool_max_size", 5),
                     kwargs={"autocommit": True, "connect_timeout": 10},
                     configure=self._configure_age_session,
+                    max_idle=60,
+                    max_lifetime=300,
+                    reconnect_timeout=300,
+                    reconnect_failed=_pool_reconnect_failed,
                     open=True,
                 )
             except Exception as exc:
@@ -539,14 +548,14 @@ class AGEClient:
     ) -> List[Dict[str, Any]]:
         """
         Execute a Cypher query against AGE.
-        Returns List[Dict] — same shape as Neo4jClient.run_query().
+        Returns List[Dict] — same shape as GraphClient.run_query().
 
         Async interface — sync I/O runs in thread pool via to_thread().
         """
         return await asyncio.to_thread(
             self._sync_execute, query, parameters
         )
-    # ── convenience methods (Neo4jClient interface parity) ────────────────────
+    # ── convenience methods (GraphClient interface parity) ────────────────────
 
     async def get_security_context(self, alert_id: str) -> Dict:
         """
@@ -812,7 +821,7 @@ class AGEClient:
         the actual IKS is written to GraphSnapshot via
         on_iks_recalculated() after the first triage decision.
 
-        This method exists for interface parity with Neo4jClient.
+        This method exists for interface parity with GraphClient.
         GAE P12: AGEClient cannot import from domain copilot repos.
         """
         return 0.0
@@ -909,7 +918,7 @@ class AGEClient:
                 params,
             )
 
-        # Preserve the source Neo4jClient contract: every Decision trace is
+        # Preserve the source GraphClient contract: every Decision trace is
         # linked to its Alert through DECIDED_ON.
         await self.run_query(
             """
@@ -1169,7 +1178,7 @@ def get_graph_client(dsn: str, graph_name: str) -> AGEClient:
 
     During Block 8.5 transition in SOC repo:
         from ci_platform.graph import get_graph_client as _age_factory
-        neo4j_client = _age_factory(dsn=config.dsn, graph_name=config.graph)
+        graph_client = _age_factory(dsn=config.dsn, graph_name=config.graph)
     """
     global _client
     if _client is None:

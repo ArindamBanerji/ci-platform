@@ -1,5 +1,5 @@
 """
-AGE Cypher compatibility tests — document known AGE vs Neo4j incompatibilities.
+AGE Cypher compatibility tests — document known AGE vs AGE incompatibilities.
 
 Each test encodes a lesson learned during the AGE migration (Block 8.5).
 Tests run without live AGE — they verify our query patterns avoid known issues.
