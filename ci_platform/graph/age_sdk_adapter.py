@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from ci_platform.graph.age_graph_store import AGEGraphStore
 
@@ -471,6 +471,14 @@ class AGEGraphStoreAdapter:
 
     def load_latest_centroids(self, domain: str) -> Any | None:
         return self._store.load_latest_centroids(domain)
+
+    def load_latest_checkpoint_for_regime(
+        self, domain: str, regime_tag: str
+    ) -> dict[str, Any] | None:
+        loader = getattr(self._store, "load_latest_checkpoint_for_regime", None)
+        if not callable(loader):
+            return None
+        return cast(dict[str, Any] | None, loader(domain, regime_tag))
 
     def get_centroid_checkpoints(
         self,
