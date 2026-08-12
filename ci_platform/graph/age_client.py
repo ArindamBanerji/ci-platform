@@ -134,6 +134,7 @@ class AGEClient:
         self._pool_max_size = pool_max_size if pool_max_size is not None else _env_int("AGE_POOL_MAX_SIZE", 5)
         self._pool_available = _PSYCOPG_POOL_AVAILABLE
         self._pool = None
+        self._pool_lock = threading.Lock()
         self._warm_conn = None
         self._warm_lock = threading.RLock()
         self._closed = False
@@ -182,7 +183,11 @@ class AGEClient:
         return conn
 
     def _ensure_pool(self):
-        if getattr(self, "_pool", None) is None:
+        if getattr(self, "_pool", None) is not None:
+            return self._pool
+        with self._pool_lock:
+            if getattr(self, "_pool", None) is not None:
+                return self._pool
             try:
                 from psycopg_pool import ConnectionPool  # type: ignore[import-not-found]
 
@@ -236,15 +241,22 @@ class AGEClient:
                 self._ensure_warm_connection()
 
     def _sync_close(self) -> None:
-        pool = getattr(self, "_pool", None)
-        if pool is not None:
+        pool_lock = getattr(self, "_pool_lock", None)
+        if pool_lock is None:
+            pool_lock = threading.Lock()
+            self._pool_lock = pool_lock
+        with pool_lock:
+            if self._closed:
+                return
+            pool = getattr(self, "_pool", None)
             try:
-                pool.close()
+                if pool is not None:
+                    pool.close()
             finally:
                 self._pool = None
+                self._closed = True
         with getattr(self, "_warm_lock", threading.RLock()):
             self._discard_warm_connection()
-        self._closed = True
 
     # ── graph setup ───────────────────────────────────────────────────────────
 

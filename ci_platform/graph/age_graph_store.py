@@ -580,7 +580,13 @@ class AGEGraphStore:
         }
 
     def _run_query(self, cypher: str) -> List[Dict[str, Any]]:
-        return self._run(self._client.run_query(cypher, None)) or []
+        try:
+            return self._run(self._client.run_query(cypher, None)) or []
+        except Exception as exc:
+            if type(exc).__name__ == "PoolClosed":
+                log.error("AGE pool closed during query: %s", exc)
+                return []
+            raise
 
     async def run_transaction(
         self,
