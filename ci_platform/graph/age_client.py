@@ -130,8 +130,8 @@ class AGEClient:
         self._dsn = _with_sslmode_disabled(str(dsn).strip())
         self._graph = str(graph_name).strip()
         self._pool_requested = _env_truthy("AGE_USE_POOL") if use_pool is None else bool(use_pool)
-        self._pool_min_size = pool_min_size if pool_min_size is not None else _env_int("AGE_POOL_MIN_SIZE", 1)
-        self._pool_max_size = pool_max_size if pool_max_size is not None else _env_int("AGE_POOL_MAX_SIZE", 5)
+        self._pool_min_size = pool_min_size if pool_min_size is not None else _env_int("AGE_POOL_MIN_SIZE", 3)
+        self._pool_max_size = pool_max_size if pool_max_size is not None else _env_int("AGE_POOL_MAX_SIZE", 15)
         self._pool_available = _PSYCOPG_POOL_AVAILABLE
         self._pool = None
         self._pool_lock = threading.Lock()
@@ -178,7 +178,7 @@ class AGEClient:
         conn.execute("SET search_path = ag_catalog, '$user', public; SET statement_timeout = '120s'")
 
     def _connect_fresh(self, *, autocommit: bool) -> psycopg.Connection:
-        conn = psycopg.connect(self._dsn, autocommit=autocommit, connect_timeout=10)
+        conn = psycopg.connect(self._dsn, autocommit=autocommit, connect_timeout=15)
         self._configure_age_session(conn)
         return conn
 
@@ -193,9 +193,9 @@ class AGEClient:
 
                 self._pool = ConnectionPool(
                     conninfo=self._dsn,
-                    min_size=getattr(self, "_pool_min_size", 1),
-                    max_size=getattr(self, "_pool_max_size", 5),
-                    kwargs={"autocommit": True, "connect_timeout": 10},
+                    min_size=getattr(self, "_pool_min_size", 3),
+                    max_size=getattr(self, "_pool_max_size", 15),
+                    kwargs={"autocommit": True, "connect_timeout": 15},
                     configure=self._configure_age_session,
                     max_idle=60,
                     max_lifetime=300,
