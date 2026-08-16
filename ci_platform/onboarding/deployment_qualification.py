@@ -26,6 +26,8 @@ from typing import Dict, List, Optional
 import numpy as np
 
 FACTOR_NAMES = [
+    # Retained for the cross-repo legacy qualification contract; SOC canonical
+    # factor 0 is privileged_identity_context.
     "travel_match", "asset_criticality", "threat_intel_enrichment",
     "time_anomaly", "pattern_history", "device_trust",
 ]
@@ -46,6 +48,7 @@ _THRESHOLDS = {
 
 # Remediation mapping: which integration reduces which factor's noise
 REMEDIATION_MAP = {
+    # Legacy key retained for compatibility with existing qualification data.
     "travel_match": {
         "integration": "HR/Travel system",
         "expected_reduction": 0.30,

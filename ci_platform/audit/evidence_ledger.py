@@ -122,6 +122,8 @@ class EvidenceLedger:
         entry = ledger.append(
             decision_id="d-001",
             alert_id="a-123",
+            # Legacy compatibility example; SOC canonical factor 0 is
+            # privileged_identity_context.
             factor_breakdown={"travel_match": 0.8},
             action="escalate",
             confidence=0.91,
