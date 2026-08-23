@@ -2253,6 +2253,12 @@ class AGEGraphStore:
             node["target_domain"] = self._node_to_dict(row.get("dst", {})).get(
                 "domain_id", node.get("target_domain")
             )
+            metadata = self._json_field_value(node.get("metadata"))
+            node["similarity_score"] = self._as_float(
+                metadata.get("similarity_score")
+                if isinstance(metadata, dict) and metadata.get("similarity_score") is not None
+                else node.get("confidence")
+            )
             patterns.append(node)
         return patterns
 
