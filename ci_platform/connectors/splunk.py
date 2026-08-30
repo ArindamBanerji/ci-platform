@@ -96,7 +96,7 @@ class SplunkConnector(SourceConnectorProtocol):
                 json=payload,
                 timeout=15,
             )
-        return resp.status_code == 200
+        return bool(resp.status_code == 200)
 
     async def health_check(self) -> Dict:
         cfg = self._config

@@ -87,7 +87,7 @@ class SentinelConnector(SourceConnectorProtocol):
                 timeout=30,
             )
 
-        return resp.status_code == 200
+        return bool(resp.status_code == 200)
 
     async def health_check(self) -> Dict:
         read_ok = False

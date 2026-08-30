@@ -24,7 +24,8 @@ env = [
 
 [tool.mypy]
 python_version = "3.11"
-ignore_missing_imports = true
+mypy_path = ["$MYPY_CONFIG_FILE_DIR/../copilot-sdk", "$MYPY_CONFIG_FILE_DIR/../graph-attention-engine-v50"]
+follow_imports = "skip"
 warn_return_any = true
 warn_unused_configs = true
 disable_error_code = ["annotation-unchecked"]
@@ -48,3 +49,7 @@ ignore_errors = true
 [[tool.mypy.overrides]]
 module = ["psycopg.*"]
 follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = ["spacy", "spacy.*", "onelogin", "onelogin.*"]
+ignore_missing_imports = true
