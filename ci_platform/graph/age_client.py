@@ -42,7 +42,13 @@ import psycopg  # sync only — no AsyncConnection anywhere
 logger = logging.getLogger(__name__)
 
 def _with_sslmode_disabled(dsn: str) -> str:
-    if "sslmode" in dsn:
+    """Apply local-dev SSL defaults without overriding production DSNs."""
+    if _env_truthy("CI_DEV_MODE"):
+        if re.search(r"(?i)\bsslmode=", dsn):
+            return re.sub(r"(?i)(\bsslmode=)[^\s&]+", r"\1disable", dsn)
+        sep = "&" if "?" in dsn else ("?" if "://" in dsn else " ")
+        return f"{dsn}{sep}sslmode=disable"
+    if os.getenv("GRAPH_DSN", "").strip() or re.search(r"(?i)\bsslmode=", dsn):
         return dsn
     sep = "&" if "?" in dsn else ("?" if "://" in dsn else " ")
     return f"{dsn}{sep}sslmode=disable"
