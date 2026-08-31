@@ -469,6 +469,72 @@ class AGEGraphStoreAdapter:
             **kwargs,
         )
 
+    def save_evolution(self, domain: str, variant_id: str, state: dict[str, Any]) -> None:
+        self._store.save_evolution(domain, variant_id, state)
+
+    def get_evolution(self, domain: str, variant_id: str) -> dict[str, Any] | None:
+        return self._store.get_evolution(domain, variant_id)
+
+    def list_evolutions(self, domain: str) -> list[dict[str, Any]]:
+        return self._store.list_evolutions(domain)
+
+    def delete_evolution(self, domain: str, variant_id: str) -> None:
+        self._store.delete_evolution(domain, variant_id)
+
+    def save_evolution_state(self, domain: str, variant_id: str, state: dict[str, Any]) -> None:
+        self._store.save_evolution_state(domain, variant_id, state)
+
+    def get_evolution_state(self, domain: str, variant_id: str) -> dict[str, Any] | None:
+        return self._store.get_evolution_state(domain, variant_id)
+
+    def save_posterior(self, domain: str, key: str, state: dict[str, Any]) -> None:
+        self._store.save_posterior(domain, key, state)
+
+    def get_posterior(self, domain: str, key: str) -> dict[str, Any] | None:
+        return self._store.get_posterior(domain, key)
+
+    def list_posteriors(self, domain: str) -> list[dict[str, Any]]:
+        return self._store.list_posteriors(domain)
+
+    def delete_posterior(self, domain: str, key: str) -> None:
+        self._store.delete_posterior(domain, key)
+
+    def save_promotion(self, domain: str, rule_id: str, state: dict[str, Any]) -> None:
+        self._store.save_promotion(domain, rule_id, state)
+
+    def get_promotion(self, domain: str, rule_id: str) -> dict[str, Any] | None:
+        return self._store.get_promotion(domain, rule_id)
+
+    def list_promotions(self, domain: str) -> list[dict[str, Any]]:
+        return self._store.list_promotions(domain)
+
+    def delete_promotion(self, domain: str, rule_id: str) -> None:
+        self._store.delete_promotion(domain, rule_id)
+
+    def save_ledger(self, domain: str, entry_id: str, state: dict[str, Any]) -> None:
+        self._store.save_ledger(domain, entry_id, state)
+
+    def get_ledger(self, domain: str, entry_id: str) -> dict[str, Any] | None:
+        return self._store.get_ledger(domain, entry_id)
+
+    def list_ledgers(self, domain: str) -> list[dict[str, Any]]:
+        return self._store.list_ledgers(domain)
+
+    def delete_ledger(self, domain: str, entry_id: str) -> None:
+        self._store.delete_ledger(domain, entry_id)
+
+    def save_governance(self, domain: str, key: str, state: dict[str, Any]) -> None:
+        self._store.save_governance(domain, key, state)
+
+    def get_governance(self, domain: str, key: str) -> dict[str, Any] | None:
+        return self._store.get_governance(domain, key)
+
+    def list_governance(self, domain: str) -> list[dict[str, Any]]:
+        return self._store.list_governance(domain)
+
+    def delete_governance(self, domain: str, key: str) -> None:
+        self._store.delete_governance(domain, key)
+
     def load_latest_centroids(self, domain: str) -> Any | None:
         return self._store.load_latest_centroids(domain)
 

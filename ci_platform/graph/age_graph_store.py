@@ -97,6 +97,133 @@ class AGEGraphStore:
     def _S(self, value: Any) -> str:
         return str(self._client._S(value))
 
+    def _save_platform_state(
+        self, label: str, domain: str, key: str, state: Mapping[str, Any]
+    ) -> None:
+        """Upsert one domain-scoped control-plane state node in AGE."""
+        if not str(domain).strip() or not str(key).strip():
+            raise ValueError("platform state requires non-empty domain and key")
+        payload = json.dumps(dict(state), sort_keys=True, default=str)
+        where = f"domain: {self._S(str(domain))}, state_key: {self._S(str(key))}"
+        self._run_query(f"MATCH (n:{label} {{{where}}}) DELETE n")
+        props = (
+            "{"
+            f"domain: {self._S(str(domain))}, "
+            f"state_key: {self._S(str(key))}, "
+            f"payload: {self._S(payload)}, "
+            f"updated_at: {self._S(datetime.now(timezone.utc).timestamp())}"
+            "}"
+        )
+        self._run_query(f"CREATE (n:{label} {props}) RETURN n")
+
+    def _get_platform_state(
+        self, label: str, domain: str, key: str
+    ) -> Dict[str, Any] | None:
+        rows = self._run_query(
+            f"MATCH (n:{label}) WHERE n.domain = {self._S(str(domain))} "
+            f"AND n.state_key = {self._S(str(key))} "
+            "RETURN n.payload AS payload ORDER BY n.updated_at DESC LIMIT 1"
+        )
+        if not rows:
+            return None
+        payload = rows[0].get("payload")
+        if isinstance(payload, str):
+            decoded = json.loads(payload)
+        elif isinstance(payload, Mapping):
+            decoded = dict(payload)
+        else:
+            raise ValueError(f"AGE {label} payload is not a mapping")
+        if not isinstance(decoded, dict):
+            raise ValueError(f"AGE {label} payload is not a mapping")
+        return dict(decoded)
+
+    def _list_platform_state(self, label: str, domain: str) -> list[Dict[str, Any]]:
+        rows = self._run_query(
+            f"MATCH (n:{label}) WHERE n.domain = {self._S(str(domain))} "
+            "RETURN n.state_key AS state_key, n.payload AS payload "
+            "ORDER BY n.updated_at DESC"
+        )
+        result: list[Dict[str, Any]] = []
+        for row in rows:
+            payload = row.get("payload")
+            decoded = json.loads(payload) if isinstance(payload, str) else payload
+            if not isinstance(decoded, dict):
+                raise ValueError(f"AGE {label} payload is not a mapping")
+            result.append({"key": str(row.get("state_key")), **dict(decoded)})
+        return result
+
+    def _delete_platform_state(self, label: str, domain: str, key: str) -> None:
+        self._run_query(
+            f"MATCH (n:{label}) WHERE n.domain = {self._S(str(domain))} "
+            f"AND n.state_key = {self._S(str(key))} DELETE n"
+        )
+
+    def save_evolution(self, domain: str, variant_id: str, state: Dict[str, Any]) -> None:
+        self._save_platform_state("EvolutionState", domain, variant_id, state)
+
+    def get_evolution(self, domain: str, variant_id: str) -> Dict[str, Any] | None:
+        return self._get_platform_state("EvolutionState", domain, variant_id)
+
+    def list_evolutions(self, domain: str) -> list[Dict[str, Any]]:
+        return self._list_platform_state("EvolutionState", domain)
+
+    def delete_evolution(self, domain: str, variant_id: str) -> None:
+        self._delete_platform_state("EvolutionState", domain, variant_id)
+
+    def save_evolution_state(self, domain: str, variant_id: str, state: Dict[str, Any]) -> None:
+        self.save_evolution(domain, variant_id, state)
+
+    def get_evolution_state(self, domain: str, variant_id: str) -> Dict[str, Any] | None:
+        return self.get_evolution(domain, variant_id)
+
+    def save_posterior(self, domain: str, key: str, state: Dict[str, Any]) -> None:
+        self._save_platform_state("PosteriorState", domain, key, state)
+
+    def get_posterior(self, domain: str, key: str) -> Dict[str, Any] | None:
+        return self._get_platform_state("PosteriorState", domain, key)
+
+    def list_posteriors(self, domain: str) -> list[Dict[str, Any]]:
+        return self._list_platform_state("PosteriorState", domain)
+
+    def delete_posterior(self, domain: str, key: str) -> None:
+        self._delete_platform_state("PosteriorState", domain, key)
+
+    def save_promotion(self, domain: str, rule_id: str, state: Dict[str, Any]) -> None:
+        self._save_platform_state("PromotionState", domain, rule_id, state)
+
+    def get_promotion(self, domain: str, rule_id: str) -> Dict[str, Any] | None:
+        return self._get_platform_state("PromotionState", domain, rule_id)
+
+    def list_promotions(self, domain: str) -> list[Dict[str, Any]]:
+        return self._list_platform_state("PromotionState", domain)
+
+    def delete_promotion(self, domain: str, rule_id: str) -> None:
+        self._delete_platform_state("PromotionState", domain, rule_id)
+
+    def save_ledger(self, domain: str, entry_id: str, state: Dict[str, Any]) -> None:
+        self._save_platform_state("CompoundingLedger", domain, entry_id, state)
+
+    def get_ledger(self, domain: str, entry_id: str) -> Dict[str, Any] | None:
+        return self._get_platform_state("CompoundingLedger", domain, entry_id)
+
+    def list_ledgers(self, domain: str) -> list[Dict[str, Any]]:
+        return self._list_platform_state("CompoundingLedger", domain)
+
+    def delete_ledger(self, domain: str, entry_id: str) -> None:
+        self._delete_platform_state("CompoundingLedger", domain, entry_id)
+
+    def save_governance(self, domain: str, key: str, state: Dict[str, Any]) -> None:
+        self._save_platform_state("GovernanceState", domain, key, state)
+
+    def get_governance(self, domain: str, key: str) -> Dict[str, Any] | None:
+        return self._get_platform_state("GovernanceState", domain, key)
+
+    def list_governance(self, domain: str) -> list[Dict[str, Any]]:
+        return self._list_platform_state("GovernanceState", domain)
+
+    def delete_governance(self, domain: str, key: str) -> None:
+        self._delete_platform_state("GovernanceState", domain, key)
+
     def _l5_props_literal(self, properties: Mapping[str, Any]) -> str:
         return "{" + ", ".join(f"{key}: {self._S(value)}" for key, value in properties.items()) + "}"
 

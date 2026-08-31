@@ -30,6 +30,7 @@ class S2PDomainConfigV2:
         "payment_terms_impact",
         "commodity_index_correlation",
         "tax_regulatory_compliance",
+        "environmental_risk",
     ]
 
     penalty_ratio = 5.0
