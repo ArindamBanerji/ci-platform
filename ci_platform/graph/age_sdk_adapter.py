@@ -635,6 +635,9 @@ class AGEGraphStoreAdapter:
     def get_evolution_events(self, domain: str, **kwargs: Any) -> list[dict[str, Any]]:
         return self._store.get_evolution_events(domain, **kwargs)
 
+    def prune_evolution_events(self, domain: str, keep_recent: int = 10_000) -> int:
+        return self._store.prune_evolution_events(domain, keep_recent=keep_recent)
+
     def archive_old_decisions(self, domain: str, keep_recent: int = 800) -> int:
         return self._store.archive_old_decisions(domain, keep_recent=keep_recent)
 

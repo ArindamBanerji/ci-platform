@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, cast
 
 import numpy as np
+import psycopg
 
 from ci_platform.graph.age_client import AGEClient, AGETransaction
 
@@ -96,6 +97,14 @@ class AGEGraphStore:
 
     def _S(self, value: Any) -> str:
         return str(self._client._S(value))
+
+    def _age_relation(self, label: str) -> str:
+        graph_name = str(getattr(self._client, "_graph", "") or "")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", graph_name):
+            raise ValueError(f"unsafe AGE graph name: {graph_name!r}")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", label):
+            raise ValueError(f"unsafe AGE label name: {label!r}")
+        return f'{graph_name}."{label}"'
 
     def _save_platform_state(
         self, label: str, domain: str, key: str, state: Mapping[str, Any]
@@ -3417,6 +3426,83 @@ class AGEGraphStore:
             """
         )
         return [self._node_to_dict(row.get("e", row)) for row in rows]
+
+    def prune_evolution_events(self, domain: str, keep_recent: int = 10_000) -> int:
+        """Delete old proof_record events while preserving non-proof evolution state first."""
+        domain_value = str(domain)
+        keep_recent = max(int(keep_recent), 0)
+        event_table = self._age_relation("EvolutionEvent")
+        edge_table = self._age_relation("TRIGGERED_EVOLUTION")
+        props = "(properties::text)::jsonb"
+        dsn = str(getattr(self._client, "_dsn", ""))
+        if not dsn:
+            raise ValueError("AGEGraphStore prune requires a configured DSN")
+        with psycopg.connect(dsn) as conn:
+            conn.execute("SET statement_timeout = '120s'")
+            non_proof = conn.execute(
+                f"""
+                SELECT count(*)
+                FROM {event_table}
+                WHERE {props}->>'domain' = %s
+                  AND coalesce({props}->>'event_type', '') <> 'proof_record'
+                """,
+                (domain_value,),
+            ).fetchone()
+            proof_keep = max(keep_recent - int(non_proof[0] if non_proof else 0), 0)
+            proof = conn.execute(
+                f"""
+                SELECT count(*)
+                FROM {event_table}
+                WHERE {props}->>'domain' = %s
+                  AND {props}->>'event_type' = 'proof_record'
+                """,
+                (domain_value,),
+            ).fetchone()
+            proof_count = int(proof[0] if proof else 0)
+            remaining_to_delete = max(proof_count - proof_keep, 0)
+            if remaining_to_delete == 0:
+                return 0
+            conn.execute(
+                "CREATE TEMP TABLE IF NOT EXISTS evolution_prune_ids (id ag_catalog.graphid) ON COMMIT DELETE ROWS"
+            )
+            deleted_total = 0
+            while remaining_to_delete > 0:
+                batch_size = min(remaining_to_delete, 25_000)
+                conn.execute("TRUNCATE evolution_prune_ids")
+                inserted = conn.execute(
+                    f"""
+                    INSERT INTO evolution_prune_ids(id)
+                    SELECT id
+                    FROM {event_table}
+                    WHERE {props}->>'domain' = %s
+                      AND {props}->>'event_type' = 'proof_record'
+                    LIMIT %s
+                    """,
+                    (domain_value, batch_size),
+                ).rowcount
+                if inserted <= 0:
+                    conn.commit()
+                    break
+                conn.execute(
+                    f"""
+                    DELETE FROM {edge_table} r
+                    USING evolution_prune_ids v
+                    WHERE r.end_id::text = v.id::text
+                    """
+                )
+                deleted = conn.execute(
+                    f"""
+                    DELETE FROM {event_table} e
+                    USING evolution_prune_ids v
+                    WHERE e.id::text = v.id::text
+                    """
+                ).rowcount
+                conn.commit()
+                if deleted <= 0:
+                    break
+                deleted_total += int(deleted)
+                remaining_to_delete -= int(deleted)
+            return deleted_total
 
     def archive_old_decisions(self, domain: str, keep_recent: int = 800) -> int:
         """Archive all but the newest active Decisions for one domain."""

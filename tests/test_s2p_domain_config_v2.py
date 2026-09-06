@@ -5,7 +5,7 @@ def test_s2p_domain_config_v2_shape():
     assert S2PDomainConfigV2.domain == "s2p"
     assert len(S2PDomainConfigV2.categories) == 5
     assert len(S2PDomainConfigV2.actions) == 5
-    assert len(S2PDomainConfigV2.factors) == 7
+    assert len(S2PDomainConfigV2.factors) == 8
 
 
 def test_s2p_domain_config_v2_categories():
@@ -34,6 +34,7 @@ def test_s2p_domain_config_v2_factors_count():
         "payment_terms_impact",
         "commodity_index_correlation",
         "tax_regulatory_compliance",
+        "environmental_risk",
     ]
 
 
@@ -47,5 +48,5 @@ def test_s2p_domain_config_v2_penalty_ratio():
 def test_s2p_domain_config_v2_tensor_size():
     assert S2PDomainConfigV2.n_categories == 5
     assert S2PDomainConfigV2.n_actions == 5
-    assert S2PDomainConfigV2.n_factors == 7
-    assert S2PDomainConfigV2.tensor_size() == 175
+    assert S2PDomainConfigV2.n_factors == 8
+    assert S2PDomainConfigV2.tensor_size() == 200

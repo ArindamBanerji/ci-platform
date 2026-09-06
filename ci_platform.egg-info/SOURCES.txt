@@ -44,11 +44,14 @@ ci_platform/strategy/two_phase_strategy.py
 tests/test_age_archive.py
 tests/test_age_client.py
 tests/test_age_cypher_compat.py
+tests/test_age_evolution_event_link.py
 tests/test_age_graph_store.py
+tests/test_age_graph_store_topology.py
 tests/test_age_graph_store_v.py
 tests/test_age_sdk_adapter.py
 tests/test_age_type_roundtrip.py
 tests/test_agtype.py
+tests/test_artifact_domain_scoping.py
 tests/test_background_task_manager.py
 tests/test_celonis_connector.py
 tests/test_centroid_distance.py
@@ -59,6 +62,7 @@ tests/test_counter_store_route_readiness.py
 tests/test_dataops_schema.py
 tests/test_decision_pipeline.py
 tests/test_deployment_qualification.py
+tests/test_domain_enforcement.py
 tests/test_enterprise_connector_profiles.py
 tests/test_entity_cache.py
 tests/test_entity_cache_integration.py
@@ -75,6 +79,7 @@ tests/test_saml.py
 tests/test_sap_connector.py
 tests/test_sentinel.py
 tests/test_sentinel_writeback.py
+tests/test_soc_outcome_checkpoint_transaction.py
 tests/test_splunk.py
 tests/test_two_phase_strategy.py
 tests/test_type_checking.py
