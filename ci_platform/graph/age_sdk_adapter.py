@@ -313,8 +313,18 @@ class AGEGraphStoreAdapter:
             domain=domain,
         )
 
-    def get_decision(self, decision_id: str, domain: str) -> dict[str, Any] | None:
-        return self._store.get_decision(decision_id, domain=domain)
+    def get_decision(
+        self,
+        decision_id: str,
+        domain: str,
+        *,
+        include_outcome: bool = False,
+    ) -> dict[str, Any] | None:
+        return self._store.get_decision(
+            decision_id,
+            domain=domain,
+            include_outcome=include_outcome,
+        )
 
     def get_decisions(
         self,
@@ -690,6 +700,25 @@ class AGEGraphStoreAdapter:
         return self._store.query_similar(
             decision_id=str(entity_id), limit=int(limit), domain=domain
         )
+
+    def decision_movement(self, domain: str, decision_id: str) -> list[dict[str, Any]]:
+        return self._store.decision_movement(domain, decision_id)
+
+    def contextual_judgment(
+        self, domain: str, entity_group: str, category: str
+    ) -> list[dict[str, Any]]:
+        return self._store.contextual_judgment(domain, entity_group, category)
+
+    def promotion_basis(self, domain: str, rule_id: str) -> list[dict[str, Any]]:
+        return self._store.promotion_basis(domain, rule_id)
+
+    def transfer_witness(
+        self, source_domain: str, target_domain: str, pattern_id: str
+    ) -> list[dict[str, Any]]:
+        return self._store.transfer_witness(source_domain, target_domain, pattern_id)
+
+    def list_fingerprints(self, domain: str | None = None) -> list[dict[str, Any]]:
+        return self._store.list_fingerprints(domain)
 
     def write_entity_enrichment(
         self,

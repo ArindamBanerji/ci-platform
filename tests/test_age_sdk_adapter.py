@@ -40,7 +40,7 @@ class FakeGraphStore:
     def write_outcome(self, decision_id, actual_action, is_correct, metadata=None, *, domain):
         self.calls.append(("write_outcome", decision_id, actual_action, is_correct, metadata, domain))
 
-    def get_decision(self, decision_id, domain):
+    def get_decision(self, decision_id, domain, include_outcome=False):
         self.calls.append(("get_decision", decision_id, domain))
         return self.decisions.get(decision_id)
 

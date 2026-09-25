@@ -85,7 +85,7 @@ def test_write_decision_creates_factor_vector_node(age_test_graph):
         store.close()
 
 
-def test_factor_vector_failure_does_not_block_decision(age_test_graph, caplog):
+def test_factor_vector_failure_rolls_back_decision(age_test_graph):
     from ci_platform.graph.age_graph_store import AGEGraphStore
 
     class FailingFactorVectorStore(AGEGraphStore):
@@ -95,18 +95,20 @@ def test_factor_vector_failure_does_not_block_decision(age_test_graph, caplog):
     dsn, graph_name = age_test_graph
     store = FailingFactorVectorStore(dsn=dsn, graph_name=graph_name)
     try:
-        decision_id = store.write_decision(
-            "test",
-            category="topology",
-            action="inspect",
-            confidence=0.9,
-            factors={"risk": 0.4},
-        )
+        decision_id = "DEC-FACTOR-ROLLBACK"
+        with pytest.raises(RuntimeError, match="injected FactorVector failure"):
+            store.write_decision(
+                "test",
+                category="topology",
+                action="inspect",
+                confidence=0.9,
+                factors={"risk": 0.4},
+                metadata={"decision_id": decision_id},
+            )
         rows = store._run_query(
             f"MATCH (d:Decision {{decision_id: {store._S(decision_id)}}}) RETURN d"
         )
-        assert rows
-        assert "injected FactorVector failure" in caplog.text
+        assert not rows
     finally:
         store.close()
 

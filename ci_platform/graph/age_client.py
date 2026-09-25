@@ -349,17 +349,22 @@ class AGEClient:
         if value is None:
             return "null"
         if isinstance(value, (list, tuple)):
-            return f"'{json.dumps(value)}'"
+            return AGEClient._quote_cypher_string(json.dumps(value))
         if hasattr(value, 'tolist'):  # numpy array
-            return f"'{json.dumps(value.tolist())}'"
+            return AGEClient._quote_cypher_string(json.dumps(value.tolist()))
         if isinstance(value, bool):
             return str(value).lower()
         if isinstance(value, (int, float)):
             return str(value)
         if isinstance(value, str):
-            escaped = value.replace("'", "\\'")
-            return f"'{escaped}'"
-        return f"'{json.dumps(value)}'"
+            return AGEClient._quote_cypher_string(value)
+        return AGEClient._quote_cypher_string(json.dumps(value))
+
+    @staticmethod
+    def _quote_cypher_string(value: str) -> str:
+        """Return one AGE Cypher string literal with escaped content."""
+        escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+        return f"'{escaped}'"
 
     def _S(self, value: Any) -> str:
         """Canonical helper for direct AGE Cypher string interpolation."""
@@ -376,9 +381,16 @@ class AGEClient:
         Uses a bracket-aware split so commas inside {}, [], () are not
         treated as column separators.
         """
-        m = re.search(
-            r'RETURN\s+(.+?)(?:\s+LIMIT\s|\s+ORDER\s|\s+SKIP\s|$)',
+        # Keywords and commas inside quoted values are not query syntax.
+        syntax = re.sub(
+            r"""'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/""",
+            lambda match: ("_" if match.group(0)[0] in "\"'" else " ") * len(match.group(0)),
             cypher,
+            flags=re.DOTALL,
+        )
+        m = re.search(
+            r'\bRETURN\s+(.+?)(?:\s+LIMIT\s|\s+ORDER\s|\s+SKIP\s|$)',
+            syntax,
             re.IGNORECASE | re.DOTALL,
         )
         if not m:
@@ -644,26 +656,21 @@ class AGEClient:
         """Count recent SOC Decisions for one source entity (R2)."""
         if not entity_id:
             return 0
-        try:
-            window_start = int(
-                (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).timestamp()
-                * 1000
-            )
-            results = await self.run_query(
-                f"""
-                MATCH (d:Decision)
-                WHERE d.domain = 'soc'
-                  AND (d.archived IS NULL OR d.archived <> true)
-                  AND d.source_id = {self._S(entity_id)}
-                  AND d.timestamp_epoch > {window_start}
-                RETURN count(d) AS cnt
-                """
-            )
-            return int(results[0]["cnt"]) if results else 0
-        # Intentional: shadow comparison requires both paths to return 0 on
-        # failure for parity. Remove after the shadow comparison gate closes.
-        except Exception:
-            return 0
+        window_start = int(
+            (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).timestamp()
+            * 1000
+        )
+        results = await self.run_query(
+            f"""
+            MATCH (d:Decision)
+            WHERE d.domain = 'soc'
+              AND (d.archived IS NULL OR d.archived <> true)
+              AND d.source_id = {self._S(entity_id)}
+              AND d.timestamp_epoch > {window_start}
+            RETURN count(d) AS cnt
+            """
+        )
+        return int(results[0]["cnt"]) if results else 0
 
     async def get_cross_category_count(
         self, entity_id: str, window_minutes: int = 60
@@ -671,26 +678,21 @@ class AGEClient:
         """Count recent distinct SOC Decision categories for one user (R7)."""
         if not entity_id:
             return 0
-        try:
-            window_start = int(
-                (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).timestamp()
-                * 1000
-            )
-            results = await self.run_query(
-                f"""
-                MATCH (d:Decision)
-                WHERE d.domain = 'soc'
-                  AND (d.archived IS NULL OR d.archived <> true)
-                  AND d.user_id = {self._S(entity_id)}
-                  AND d.timestamp_epoch > {window_start}
-                RETURN count(DISTINCT d.category) AS cnt
-                """
-            )
-            return int(results[0]["cnt"]) if results else 0
-        # Intentional: shadow comparison requires both paths to return 0 on
-        # failure for parity. Remove after the shadow comparison gate closes.
-        except Exception:
-            return 0
+        window_start = int(
+            (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).timestamp()
+            * 1000
+        )
+        results = await self.run_query(
+            f"""
+            MATCH (d:Decision)
+            WHERE d.domain = 'soc'
+              AND (d.archived IS NULL OR d.archived <> true)
+              AND d.user_id = {self._S(entity_id)}
+              AND d.timestamp_epoch > {window_start}
+            RETURN count(DISTINCT d.category) AS cnt
+            """
+        )
+        return int(results[0]["cnt"]) if results else 0
 
     async def _legacy_sequence_count(
         self, source_id: str, window_seconds: int = 3600

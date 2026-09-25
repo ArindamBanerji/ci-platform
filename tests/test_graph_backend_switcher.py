@@ -59,30 +59,32 @@ def test_create_decision_trace_accepts_evolution_kwargs():
         ))
 
 
-def test_create_decision_trace_stores_reasoning_in_node():
+@pytest.mark.age
+def test_create_decision_trace_stores_reasoning_in_node(age_store):
     """Reasoning is written into the Decision node, not silently dropped."""
-    client = _age_client()
-    conn = _mock_conn()
-    with patch("ci_platform.graph.age_client.psycopg.connect", return_value=conn):
-        asyncio.run(client.create_decision_trace(
-            decision_id="DEC-SIGTEST2",
-            alert_id="ALT-SIGTEST2",
-            action="suppress",
-            confidence=0.55,
-            reasoning="Low-confidence suppression",
-            pattern_id="PAT-001",
-            playbook_id="PLAY-001",
-            nodes_consulted=12,
-            context_snapshot={"user": {"name": "bob"}},
-        ))
-    # The SQL sent to the DB should contain the reasoning value
-    all_sql = " ".join(
-        str(call[0][0])
-        for call in conn.execute.call_args_list
-        if call[0]
-    )
-    assert "reasoning" in all_sql, "reasoning param missing from Cypher query"
-    assert "nodes_consulted" in all_sql, "nodes_consulted param missing from Cypher query"
+    asyncio.run(age_store._client.run_query(
+        "CREATE (a:Alert {alert_id: 'ALT-SIGTEST2', domain: 'soc'}) RETURN a"
+    ))
+
+    asyncio.run(age_store._client.create_decision_trace(
+        decision_id="DEC-SIGTEST2",
+        alert_id="ALT-SIGTEST2",
+        action="suppress",
+        confidence=0.55,
+        reasoning="Low-confidence suppression",
+        pattern_id="PAT-001",
+        playbook_id="PLAY-001",
+        nodes_consulted=12,
+        context_snapshot={"user": {"name": "bob"}},
+    ))
+
+    rows = asyncio.run(age_store._client.run_query(
+        """
+        MATCH (d:Decision {decision_id: 'DEC-SIGTEST2'})
+        RETURN d.reasoning AS reasoning, d.nodes_consulted AS nodes_consulted
+        """
+    ))
+    assert rows == [{"reasoning": "Low-confidence suppression", "nodes_consulted": 12}]
 
 
 # ── create_evolution_event ────────────────────────────────────────────────────

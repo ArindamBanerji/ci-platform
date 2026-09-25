@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, cast
 
@@ -23,6 +23,11 @@ from ci_platform.graph.age_client import AGEClient, AGETransaction
 
 
 log = logging.getLogger(__name__)
+
+
+class GraphUnavailableError(RuntimeError):
+    """Raised when the AGE graph backend is not available for a required operation."""
+
 
 _DK_WELFORD_VECTOR_KEYS = (
     "confirmed_mean",
@@ -35,6 +40,16 @@ _DK_WELFORD_VECTOR_KEYS = (
 
 VALID_DOMAINS = frozenset({"soc", "trading", "purchasing", "dataops", "s2p"})
 _SAFE_DOMAIN_RE = re.compile(r"^[a-zA-Z0-9_-]{1,200}$")
+
+
+@dataclass(frozen=True)
+class CrossDomainQueryRequest:
+    """Authenticated caller and exact scope presented to a trusted policy."""
+
+    principal: str
+    query_id: str
+    source_domain: str
+    target_domain: str
 
 
 def _normalize_created_at(value: Any) -> float:
@@ -58,11 +73,19 @@ class AGEGraphStoreTransaction:
         self._store = store
         self._transaction = transaction
 
+    def write_decision(self, **kwargs: Any) -> str:
+        return self._store._write_decision_impl(transaction=self._transaction, **kwargs)
+
     def write_outcome(self, **kwargs: Any) -> None:
         self._store._write_outcome_impl(transaction=self._transaction, **kwargs)
 
     def update_centroid(self, **kwargs: Any) -> None:
         self._store._update_centroid_impl(transaction=self._transaction, **kwargs)
+
+    def write_outcome_and_update_centroid(self, **kwargs: Any) -> None:
+        self._store._write_outcome_and_update_centroid_impl(
+            transaction=self._transaction, **kwargs
+        )
 
     def write_centroid_checkpoint(self, **kwargs: Any) -> None:
         self._store._write_centroid_checkpoint_impl(transaction=self._transaction, **kwargs)
@@ -71,8 +94,14 @@ class AGEGraphStoreTransaction:
 class AGEGraphStore:
     """Synchronous GraphStore adapter backed by AGEClient."""
 
-    def __init__(self, dsn: str, graph_name: str = "soc_graph") -> None:
+    def __init__(
+        self, dsn: str, graph_name: str = "soc_graph", *,
+        cross_domain_authorizer: Callable[[CrossDomainQueryRequest], bool] | None = None,
+    ) -> None:
         self._client = AGEClient(dsn=dsn, graph_name=graph_name)
+        # Installed by trusted application wiring, never by submitted query data.
+        # No policy means no cross-domain access, in every runtime profile.
+        self._cross_domain_authorizer = cross_domain_authorizer
 
     def _run(self, coro):
         try:
@@ -721,7 +750,7 @@ class AGEGraphStore:
         except Exception as exc:
             if type(exc).__name__ == "PoolClosed":
                 log.error("AGE pool closed during query: %s", exc)
-                return []
+                raise GraphUnavailableError("AGE pool closed during query") from exc
             raise
 
     async def run_transaction(
@@ -754,12 +783,49 @@ class AGEGraphStore:
         factors: Dict[str, Any],
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
+        # Reject malformed scope before opening a connection or creating the
+        # transaction coroutine.
+        domain = self._validated_domain(domain)
+        if metadata is not None and "domain" in metadata and metadata["domain"] != domain:
+            raise ValueError("decision metadata domain conflicts with calling domain")
+        result = self._run(
+            self._client.run_transaction(
+                lambda transaction: self._write_decision_impl(
+                    domain=domain,
+                    category=category,
+                    action=action,
+                    confidence=confidence,
+                    factors=factors,
+                    metadata=metadata,
+                    transaction=transaction,
+                )
+            )
+        )
+        if not isinstance(result, str) or not result:
+            raise RuntimeError("AGE write_decision transaction returned no decision_id")
+        return result
+
+    def _write_decision_impl(
+        self,
+        domain: str,
+        category: str,
+        action: str,
+        confidence: float,
+        factors: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        transaction: AGETransaction,
+    ) -> str:
+        domain = self._validated_domain(domain)
         metadata_dict = dict(metadata or {})
+        if "domain" in metadata_dict and metadata_dict["domain"] != domain:
+            raise ValueError("decision metadata domain conflicts with calling domain")
         decision_id = str(metadata_dict.get("decision_id") or f"DEC-{uuid.uuid4().hex[:8]}")
         confidence_value = float(confidence)
         entity_id = str(metadata_dict.get("entity_id") or "")
         factors_json = json.dumps(factors or {}, sort_keys=True)
         metadata_json = json.dumps(metadata_dict, sort_keys=True)
+        run_query: Callable[[str], List[Dict[str, Any]]] = lambda cypher: transaction.run_cypher(cypher)
 
         props = self._decision_props(
             decision_id,
@@ -772,48 +838,38 @@ class AGEGraphStore:
             metadata_json,
         )
         if not entity_id:
-            self._run_query(f"CREATE (d:Decision {props}) RETURN d")
+            rows = run_query(f"CREATE (d:Decision {props}) RETURN d")
         else:
             entity_query = f"""
             MATCH (e {{entity_id: {self._S(entity_id)}}})
+            WHERE e.domain = {self._S(domain)}
             WITH e LIMIT 1
             CREATE (d:Decision {props})
             CREATE (d)-[:DECIDED_ON]->(e)
             RETURN d
             """
-            rows = self._run_query(entity_query)
+            rows = run_query(entity_query)
             if not rows:
-                self._run_query(f"CREATE (d:Decision {props}) RETURN d")
+                rows = run_query(f"CREATE (d:Decision {props}) RETURN d")
+        if not rows:
+            raise RuntimeError(f"AGE did not create Decision node: {decision_id}")
 
         # The domain property remains the partitioning authority during the
         # topology transition.  The canonical edge is additive and idempotent.
-        try:
-            self._link_decision_to_domain(decision_id=decision_id, domain=domain)
-        except Exception as exc:
-            log.warning(
-                "Decision IN_DOMAIN edge creation failed: decision=%s domain=%s error=%s: %s",
-                decision_id,
-                domain,
-                type(exc).__name__,
-                exc,
-            )
-
-        try:
-            factor_names, factor_values = self._factor_vector_from_factors(factors)
-            if factor_names and factor_values:
-                self._create_factor_vector_node(
-                    decision_id=decision_id,
-                    domain=domain,
-                    factor_names=factor_names,
-                    factor_values=factor_values,
-                )
-        except Exception as exc:
-            log.warning(
-                "FactorVector persistence failed: decision=%s domain=%s error=%s: %s",
-                decision_id,
-                domain,
-                type(exc).__name__,
-                exc,
+        self._link_decision_to_domain(
+            decision_id=decision_id, domain=domain, transaction=transaction
+        )
+        self._link_decision_to_category(
+            decision_id=decision_id, domain=domain, category=category, transaction=transaction
+        )
+        factor_names, factor_values = self._factor_vector_from_factors(factors)
+        if factor_names and factor_values:
+            self._create_factor_vector_node(
+                decision_id=decision_id,
+                domain=domain,
+                factor_names=factor_names,
+                factor_values=factor_values,
+                transaction=transaction,
             )
         return decision_id
 
@@ -836,10 +892,12 @@ class AGEGraphStore:
         ]
         return [name for name, _ in scalar_items], [float(value) for _, value in scalar_items]
 
-    def _link_decision_to_domain(self, *, decision_id: str, domain: str) -> None:
+    def _link_decision_to_domain(
+        self, *, decision_id: str, domain: str, transaction: AGETransaction
+    ) -> None:
         domain_value = self._validated_domain(domain)
-        self._ensure_domain_anchor(domain_value)
-        self._run_query(
+        self._ensure_domain_anchor(domain_value, transaction=transaction)
+        rows = transaction.run_cypher(
             f"""
             MATCH (d:Decision {{decision_id: {self._S(str(decision_id))}}})
             MATCH (domain:Domain {{domain_id: {self._S(domain_value)}}})
@@ -851,6 +909,36 @@ class AGEGraphStore:
             RETURN d
             """
         )
+        rows = transaction.run_cypher(
+            f"""
+            MATCH (d:Decision {{decision_id: {self._S(str(decision_id))}}})
+            MATCH (domain:Domain {{domain_id: {self._S(domain_value)}}})
+            MATCH (d)-[:IN_DOMAIN]->(domain)
+            WHERE d.domain = {self._S(domain_value)}
+            RETURN d
+            LIMIT 1
+            """
+        )
+        if not rows:
+            raise RuntimeError(f"failed to create IN_DOMAIN edge for decision: {decision_id}")
+
+    def _link_decision_to_category(
+        self, *, decision_id: str, domain: str, category: str, transaction: AGETransaction
+    ) -> None:
+        domain_value = self._validated_domain(domain)
+        category_value = str(category)
+        category_node_id = f"{decision_id}:{category_value}"
+        rows = transaction.run_cypher(
+            f"""
+            MATCH (d:Decision {{decision_id: {self._S(str(decision_id))}}})
+            WHERE d.domain = {self._S(domain_value)}
+            CREATE (c:Category {{category_id: {self._S(category_node_id)}, name: {self._S(category_value)}, domain: {self._S(domain_value)}}})
+            CREATE (d)-[:IN_CATEGORY]->(c)
+            RETURN d, c
+            """
+        )
+        if not rows:
+            raise RuntimeError(f"failed to create IN_CATEGORY edge for decision: {decision_id}")
 
     def _create_factor_vector_node(
         self,
@@ -859,6 +947,7 @@ class AGEGraphStore:
         domain: str,
         factor_names: list[str],
         factor_values: list[float],
+        transaction: AGETransaction,
     ) -> None:
         domain_value = self._validated_domain(domain)
         vector_id = f"{decision_id}:fv"
@@ -881,8 +970,10 @@ class AGEGraphStore:
             "schema_version: 'protocol_v2'"
             "}"
         )
-        self._run_query(f"CREATE (f:FactorVector {props}) RETURN f")
-        self._run_query(
+        rows = transaction.run_cypher(f"CREATE (f:FactorVector {props}) RETURN f")
+        if not rows:
+            raise RuntimeError(f"failed to create FactorVector for decision: {decision_id}")
+        rows = transaction.run_cypher(
             f"""
             MATCH (d:Decision {{decision_id: {self._S(str(decision_id))}}})
             MATCH (f:FactorVector {{vector_id: {self._S(vector_id)}}})
@@ -895,6 +986,18 @@ class AGEGraphStore:
             RETURN f
             """
         )
+        rows = transaction.run_cypher(
+            f"""
+            MATCH (d:Decision {{decision_id: {self._S(str(decision_id))}}})
+            MATCH (f:FactorVector {{vector_id: {self._S(vector_id)}}})
+            MATCH (d)-[:HAS_FACTOR_VECTOR]->(f)
+            WHERE d.domain = {self._S(domain_value)} AND f.domain = {self._S(domain_value)}
+            RETURN f
+            LIMIT 1
+            """
+        )
+        if not rows:
+            raise RuntimeError(f"failed to create HAS_FACTOR_VECTOR edge for decision: {decision_id}")
 
     def write_governed_decision(
         self,
@@ -914,7 +1017,10 @@ class AGEGraphStore:
         factor_schema_version: str = "",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
+        domain = self._validated_domain(domain)
         metadata_dict = dict(metadata or {})
+        if "domain" in metadata_dict and metadata_dict["domain"] != domain:
+            raise ValueError("decision metadata domain conflicts with calling domain")
         metadata_dict["decision_id"] = str(decision_id)
         metadata_dict["source"] = source
         metadata_dict["scorer_version"] = scorer_version
@@ -1106,6 +1212,72 @@ class AGEGraphStore:
             final_action=final_action,
             recommended_action=recommended_action,
             was_override=was_override,
+        )
+
+    def write_outcome_and_update_centroid(
+        self,
+        *,
+        decision_id: str,
+        actual_action: str,
+        is_correct: bool,
+        domain: str,
+        category: str,
+        action: str,
+        centroid_vector: List[float],
+        delta_norm: float,
+        metadata: Optional[Dict[str, Any]] = None,
+        caused_by_decision_id: str | None = None,
+    ) -> None:
+        """Persist the verified outcome and resulting centroid atomically."""
+        self._run(
+            self._client.run_transaction(
+                lambda transaction: self._write_outcome_and_update_centroid_impl(
+                    decision_id=decision_id,
+                    actual_action=actual_action,
+                    is_correct=is_correct,
+                    domain=domain,
+                    category=category,
+                    action=action,
+                    centroid_vector=centroid_vector,
+                    delta_norm=delta_norm,
+                    metadata=metadata,
+                    caused_by_decision_id=caused_by_decision_id,
+                    transaction=transaction,
+                )
+            )
+        )
+
+    def _write_outcome_and_update_centroid_impl(
+        self,
+        *,
+        decision_id: str,
+        actual_action: str,
+        is_correct: bool,
+        domain: str,
+        category: str,
+        action: str,
+        centroid_vector: List[float],
+        delta_norm: float,
+        metadata: Optional[Dict[str, Any]],
+        caused_by_decision_id: str | None,
+        transaction: AGETransaction,
+    ) -> None:
+        self._write_outcome_impl(
+            decision_id=decision_id,
+            actual_action=actual_action,
+            is_correct=is_correct,
+            metadata=metadata,
+            domain=domain,
+            transaction=transaction,
+        )
+        self._update_centroid_impl(
+            domain=domain,
+            category=category,
+            action=action,
+            centroid_vector=centroid_vector,
+            delta_norm=delta_norm,
+            caused_by_decision_id=caused_by_decision_id or decision_id,
+            transaction=transaction,
         )
 
     def _write_outcome_impl(
@@ -1348,9 +1520,16 @@ class AGEGraphStore:
         """
         self._run_query(query)
 
-    def _ensure_domain_anchor(self, domain: str) -> None:
+    def _ensure_domain_anchor(
+        self, domain: str, transaction: AGETransaction | None = None
+    ) -> None:
         domain = str(domain)
-        rows = self._run_query(
+        if transaction is None:
+            run_query: Callable[[str], List[Dict[str, Any]]] = self._run_query
+        else:
+            tx = transaction
+            run_query = lambda cypher: tx.run_cypher(cypher)
+        rows = run_query(
             f"""
             MATCH (d:Domain {{domain_id: {self._S(domain)}}})
             RETURN d
@@ -1359,7 +1538,7 @@ class AGEGraphStore:
         )
         if rows:
             return
-        self._run_query(
+        rows = run_query(
             f"""
             CREATE (d:Domain {{
                 domain_id: {self._S(domain)},
@@ -1372,6 +1551,8 @@ class AGEGraphStore:
             RETURN d
             """
         )
+        if not rows:
+            raise RuntimeError(f"failed to create Domain anchor: {domain}")
 
     def _link_domain_summary(
         self,
@@ -2594,8 +2775,30 @@ class AGEGraphStore:
             return
         raise RuntimeError(f"AGE link_entity returned no rows for decision_id: {decision_id}")
 
-    def get_decision(self, decision_id: str, domain: str) -> Optional[Dict[str, Any]]:
+    def get_decision(
+        self,
+        decision_id: str,
+        domain: str,
+        *,
+        include_outcome: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         domain_clause = f"WHERE d.domain = {self._S(self._validated_domain(domain))}"
+        if include_outcome:
+            rows = self._run_query(
+                f"""
+                MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
+                {domain_clause}
+                OPTIONAL MATCH (d)-[:HAS_OUTCOME]->(o:Outcome)
+                RETURN properties(d) AS d, properties(o) AS o
+                LIMIT 1
+                """
+            )
+            if not rows:
+                return None
+            row = rows[0]
+            if row.get("o") is None:
+                return self._node_to_dict(row.get("d", row))
+            return self._merge_decision_outcome(row)
         rows = self._run_query(
             f"""
             MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
@@ -3091,6 +3294,7 @@ class AGEGraphStore:
         }
 
     def get_all_decisions(self, domain: str) -> List[Dict[str, Any]]:
+        """Enumerate active domain inventory across all writers, excluding archives."""
         domain_clause = self._domain_clause(domain)
         rows = self._run_query(
             f"""
@@ -3782,14 +3986,149 @@ class AGEGraphStore:
     ) -> List[Dict[str, Any]]:
         hop_count = self._safe_hops(hops)
         domain_value = self._validated_domain(domain)
-        # All production Decision nodes are domain-stamped. NULL-domain
-        # nodes are legacy artifacts and must not cross the domain
-        # boundary during production traversal.
-        domain_clause = f"WHERE n.domain = {self._S(domain_value)}"
+        # Every vertex, including the root and intermediates, must be scoped.
+        # Counting matching vertices also excludes NULL-domain legacy nodes.
+        literal = self._S(domain_value)
         rows = self._run_query(
             f"""
             MATCH p = (e {{entity_id: {self._S(entity_id)}}})-[*1..{hop_count}]-(n)
-            {domain_clause}
+            WHERE e.domain = {literal} AND n.domain = {literal}
+              AND size([v IN nodes(p) WHERE properties(v)['domain'] = {literal} | v]) = length(p) + 1
+            RETURN p
+            LIMIT 100
+            """
+        )
+        return [self._node_to_dict(row) for row in rows]
+
+    def decision_movement(self, domain: str, decision_id: str) -> List[Dict[str, Any]]:
+        domain_value = self._validated_domain(domain)
+        decision_literal = self._S(str(decision_id))
+        domain_literal = self._S(domain_value)
+        rows: List[Dict[str, Any]] = []
+        for direction, pattern in (
+            ("outbound", f"(d:Decision {{decision_id: {decision_literal}}})-[r]->(e)"),
+            ("inbound", f"(e)-[r]->(d:Decision {{decision_id: {decision_literal}}})"),
+        ):
+            linked = self._run_query(f"""
+                MATCH {pattern}
+                WHERE d.domain = {domain_literal}
+                  AND (e.domain = {domain_literal} OR e.domain IS NULL)
+                RETURN d, r, e
+                LIMIT 50
+            """)
+            rows.extend(
+                {
+                    "decision": self._node_to_dict(row.get("d")),
+                    "relationship": self._node_to_dict(row.get("r")),
+                    "evidence": self._node_to_dict(row.get("e")),
+                    "direction": direction,
+                }
+                for row in linked
+            )
+        return rows
+
+    def contextual_judgment(
+        self, domain: str, entity_group: str, category: str
+    ) -> List[Dict[str, Any]]:
+        domain_value = self._validated_domain(domain)
+        rows = self._run_query(f"""
+            MATCH p=(e)-[*1..3]-(j:Decision)
+            WHERE j.domain = {self._S(domain_value)}
+              AND j.category = {self._S(str(category))}
+              AND (e.entity_group = {self._S(str(entity_group))}
+                   OR e.entity_id = {self._S(str(entity_group))})
+            RETURN p LIMIT 100
+        """)
+        return [self._node_to_dict(row) for row in rows]
+
+    def promotion_basis(self, domain: str, rule_id: str) -> List[Dict[str, Any]]:
+        domain_value = self._validated_domain(domain)
+        rows = self._run_query(f"""
+            MATCH p=(r)-[*0..3]-(j)
+            WHERE r.domain = {self._S(domain_value)}
+              AND (r.rule_id = {self._S(str(rule_id))}
+                   OR r.source_rule = {self._S(str(rule_id))}
+                   OR r.target_rule = {self._S(str(rule_id))})
+              AND (j.domain = {self._S(domain_value)} OR j.domain IS NULL)
+            RETURN p LIMIT 100
+        """)
+        return [self._node_to_dict(row) for row in rows]
+
+    def transfer_witness(
+        self, source_domain: str, target_domain: str, pattern_id: str
+    ) -> List[Dict[str, Any]]:
+        source = self._validated_domain(source_domain)
+        target = self._validated_domain(target_domain)
+        if source == target:
+            raise ValueError("transfer witness requires distinct domains")
+        pattern_filter = "" if str(pattern_id).strip().lower() in {"", "any"} else (
+            f" AND tp.pattern_id = {self._S(str(pattern_id))}"
+        )
+        rows = self._run_query(f"""
+            MATCH (tp:TransferPattern)-[from_edge:FROM_DOMAIN]->(src:Domain),
+                  (tp)-[to_edge:TO_DOMAIN]->(dst:Domain)
+            WHERE true{pattern_filter}
+              AND src.domain_id = {self._S(source)}
+              AND dst.domain_id = {self._S(target)}
+            RETURN tp, src, dst, from_edge, to_edge
+            LIMIT 100
+        """)
+        return [
+            {
+                "transfer_pattern": self._node_to_dict(row.get("tp")),
+                "source_domain": self._node_to_dict(row.get("src")),
+                "target_domain": self._node_to_dict(row.get("dst")),
+                "from_edge": self._node_to_dict(row.get("from_edge")),
+                "to_edge": self._node_to_dict(row.get("to_edge")),
+            }
+            for row in rows
+        ]
+
+    def list_fingerprints(self, domain: Optional[str] = None) -> List[Dict[str, Any]]:
+        predicate = ""
+        if domain is not None:
+            predicate = f" WHERE f.domain = {self._S(self._validated_domain(domain))}"
+        rows = self._run_query(f"MATCH (f:Fingerprint){predicate} RETURN f LIMIT 500")
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            node = self._node_to_dict(row.get("f", row))
+            result.append({
+                "domain": str(node.get("domain", "")),
+                "fingerprint": self._json_field_value(node.get("factor_stats")),
+                "factor_names": self._json_field_value(node.get("factor_names")),
+                "fingerprint_id": node.get("fingerprint_id"),
+                "metadata": self._json_field_value(node.get("metadata")),
+            })
+        return result
+
+    def query_cross_domain_context(
+        self, entity_id: str, *, source_domain: str, target_domain: str,
+        principal: str, query_id: str = "entity_context_v1", hops: int = 2,
+    ) -> List[Dict[str, Any]]:
+        """Run one reviewed read-only traversal after an exact-pair policy check.
+
+        ``principal`` must come from application authentication. The authorizer
+        is a server-side dependency; caller-provided booleans/grants are not
+        accepted. No raw Cypher or unrestricted traversal is exposed here.
+        """
+        source = self._validated_domain(source_domain)
+        target = self._validated_domain(target_domain)
+        if source == target:
+            raise ValueError("cross-domain traversal requires distinct domains")
+        if query_id != "entity_context_v1":
+            raise ValueError("query is not in the reviewed cross-domain catalogue")
+        if not isinstance(principal, str) or not principal.strip():
+            raise PermissionError("authenticated principal is required")
+        request = CrossDomainQueryRequest(principal, query_id, source, target)
+        if self._cross_domain_authorizer is None or self._cross_domain_authorizer(request) is not True:
+            raise PermissionError("cross-domain source/target pair is not authorized")
+        source_literal, target_literal = self._S(source), self._S(target)
+        rows = self._run_query(
+            f"""
+            MATCH p = (e {{entity_id: {self._S(entity_id)}}})-[*1..{self._safe_hops(hops)}]-(n)
+            WHERE e.domain = {source_literal} AND n.domain = {target_literal}
+              AND size([v IN nodes(p)
+                        WHERE properties(v)['domain'] IN [{source_literal}, {target_literal}] | v]) = length(p) + 1
             RETURN p
             LIMIT 100
             """

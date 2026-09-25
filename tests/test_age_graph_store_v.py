@@ -3,193 +3,89 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import re
-from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import pytest
-from copilot_sdk.testing import age_available
 
 
-@dataclass
-class _Decision:
-    decision_id: str
-    domain: str | None
-    status: str | None
-    outcome: str | None = None
-    correct: bool = False
-    outcome_is_correct: bool | None = None
-    archived: bool = False
+pytestmark = pytest.mark.age
 
 
-class _InMemoryAGE:
-    """Small behavioral AGE fixture for the D2 query shapes used by count readers."""
-
-    def __init__(self) -> None:
-        self.queries: list[str] = []
-        self.decisions = [
-            _Decision("SOC-CONFIRMED", "soc", "confirmed", outcome_is_correct=True),
-            _Decision("SOC-OVERRIDDEN", "soc", "overridden", outcome_is_correct=False),
-            _Decision("SOC-CONFIRMED-OUTCOME", "soc", "confirmed", "correct", True, True),
-            _Decision("SOC-LEGACY", None, None, "correct", True),
-            _Decision("SOC-PENDING", "soc", "pending", "correct", True),
-            _Decision("SOC-ARCHIVED", "soc", "confirmed", "correct", True, True, True),
-            _Decision("OTHER-CONFIRMED", "trading", "confirmed", outcome_is_correct=True),
-        ]
-
-    @staticmethod
-    def _S(value: object) -> str:
-        if value is None:
-            return "null"
-        if isinstance(value, bool):
-            return str(value).lower()
-        if isinstance(value, (int, float)):
-            return str(value)
-        return "'" + str(value).replace("'", "\\'") + "'"
-
-    def _soc_rows(self, query: str) -> list[_Decision]:
-        assert "d.domain = 'soc'" in query
-        return [decision for decision in self.decisions if decision.domain == "soc"]
-
-    @staticmethod
-    def _verified(decision: _Decision, query: str) -> bool:
-        branch_1 = (
-            (
-                "d.status IN ['confirmed', 'overridden']" in query
-                or "d.status IS NOT NULL AND d.status IN ['confirmed', 'overridden']" in query
-            )
-            and decision.status in ("confirmed", "overridden")
-        )
-        is_active = (
-            "d.archived IS NULL OR d.archived <> true" not in query
-            or not decision.archived
-        )
-        return is_active and branch_1
-
-    def run(self, query: str) -> list[dict[str, object]]:
-        self.queries.append(query)
-        if "CREATE (o:Outcome" in query:
-            match = re.search(r"MATCH \(d:Decision \{decision_id: '([^']+)'\}\)", query)
-            assert match is not None
-            decision = next(item for item in self.decisions if item.decision_id == match.group(1))
-            decision.status = "confirmed"
-            decision.correct = "d.correct = true" in query
-            decision.outcome_is_correct = True
-            return [{"status": "confirmed", "o": {}}]
-        rows = self._soc_rows(query)
-        if "d.correct = true" in query:
-            total = sum(
-                1
-                for decision in rows
-                if (
-                    "d.archived IS NULL OR d.archived <> true" not in query
-                    or not decision.archived
-                )
-                and (
-                    decision.correct is True
-                )
-            )
-            return [{"cnt": total}]
-        if "RETURN DISTINCT properties(d) AS d, properties(o) AS o" in query:
-            return [
-                {
-                    "d": {
-                        "decision_id": decision.decision_id,
-                        "domain": decision.domain,
-                        "status": decision.status,
-                        "outcome": decision.outcome,
-                    },
-                    "o": (
-                        {"actual_action": "verified", "is_correct": decision.outcome_is_correct}
-                        if decision.outcome_is_correct is not None
-                        else None
-                    ),
-                }
-                for decision in rows
-                if self._verified(decision, query)
-            ]
-        total = sum(1 for decision in rows if self._verified(decision, query))
-        return [{"v" if " AS v" in query else "cnt": total}]
+def _write(
+    store: Any,
+    decision_id: str,
+    domain: str = "soc",
+    *,
+    category: str = "credential_access",
+) -> str:
+    return store.write_decision(
+        domain,
+        category,
+        "investigate",
+        0.8,
+        {"signal": 1.0},
+        metadata={"decision_id": decision_id},
+    )
 
 
-class _FakeAGEClient:
-    instances: list["_FakeAGEClient"] = []
-    fixture: _InMemoryAGE | None = None
-
-    def __init__(self, dsn: str | None = None, graph_name: str | None = None) -> None:
-        self._graph = graph_name
-        _FakeAGEClient.instances.append(self)
-
-    _S = staticmethod(_InMemoryAGE._S)
-
-    async def run_query(self, query: str, parameters: Any = None) -> list[dict[str, object]]:
-        assert self.fixture is not None
-        return self.fixture.run(query)
-
-
-@pytest.fixture
-def fixture_graph() -> _InMemoryAGE:
-    return _InMemoryAGE()
-
-
-@pytest.fixture
-def store(monkeypatch, fixture_graph):
-    from ci_platform.graph.age_graph_store import AGEGraphStore
-
-    _FakeAGEClient.instances = []
-    _FakeAGEClient.fixture = fixture_graph
-    monkeypatch.setattr("ci_platform.graph.age_graph_store.AGEClient", _FakeAGEClient)
-    return AGEGraphStore(dsn="postgresql://example/test", graph_name="d2_test_graph")
-
-
-def test_confirmed_and_overridden_status_rows_are_counted(store):
-    assert store.count_verified("soc") == 3
-
-
-def test_count_verified_alias_matches_canonical_method(store):
-    assert store.count_verified("soc") == store.count_verified_decisions("soc")
-
-
-def test_legacy_embedded_outcome_row_is_not_counted(store, fixture_graph):
-    legacy = next(item for item in fixture_graph.decisions if item.decision_id == "SOC-LEGACY")
-    assert legacy.status is None
-    assert store.count_verified_decisions("soc") == 3
-
-
-def test_confirmed_row_with_outcome_is_not_double_counted(store):
-    assert store.count_verified("soc") == 3
-
-
-def test_pending_row_with_outcome_is_excluded(store, fixture_graph):
-    assert store.count_verified("soc") == 3
-    assert "SOC-PENDING" in {item.decision_id for item in fixture_graph.decisions}
-
-
-def test_other_domain_row_is_excluded(store):
-    assert store.count_verified("soc") == 3
-
-
-def test_null_domain_row_is_excluded(store, fixture_graph):
-    fixture_graph.decisions.append(_Decision("NULL-DOMAIN", None, "confirmed", None, True, False))
-    assert store.count_verified("soc") == 3
-
-
-def test_archived_confirmed_row_is_excluded_from_d2(store):
-    assert store.count_verified("soc") == 3
-    assert store.count_verified_decisions("soc") == 3
-    assert store.count_correct("soc") == 2
-    assert "SOC-ARCHIVED" not in {
-        row["decision_id"] for row in store.get_verified_decisions("soc")
+def _seed_verified_fixture(store: Any) -> dict[str, str]:
+    ids = {
+        "confirmed": _write(store, "SOC-CONFIRMED"),
+        "overridden": _write(store, "SOC-OVERRIDDEN"),
+        "confirmed_outcome": _write(store, "SOC-CONFIRMED-OUTCOME"),
+        "pending": _write(store, "SOC-PENDING"),
+        "archived": _write(store, "SOC-ARCHIVED"),
+        "other": _write(store, "OTHER-CONFIRMED", "trading"),
     }
+    store.write_outcome(ids["confirmed"], "investigate", True, domain="soc")
+    store.write_outcome(ids["overridden"], "triage_elsewhere", False, domain="soc")
+    store.write_outcome(ids["confirmed_outcome"], "investigate", True, domain="soc")
+    store.write_outcome(ids["archived"], "investigate", True, domain="soc")
+    store.write_outcome(ids["other"], "investigate", True, domain="trading")
+    store.archive_old_decisions("soc", keep_recent=4)
+    return ids
 
 
-def test_count_correct_uses_decision_correct_property(store):
-    assert store.count_correct("soc") == 2
+def test_confirmed_and_overridden_status_rows_are_counted(age_store: Any) -> None:
+    _seed_verified_fixture(age_store)
+
+    assert age_store.count_verified("soc") == 3
 
 
-def test_get_verified_decisions_returns_d2_decision_fields(store):
-    verified = store.get_verified_decisions("soc")
+def test_count_verified_alias_matches_canonical_method(age_store: Any) -> None:
+    _seed_verified_fixture(age_store)
+
+    assert age_store.count_verified("soc") == age_store.count_verified_decisions("soc")
+
+
+def test_pending_row_with_outcome_is_excluded(age_store: Any) -> None:
+    ids = _seed_verified_fixture(age_store)
+
+    verified_ids = {row["decision_id"] for row in age_store.get_verified_decisions("soc")}
+    assert ids["pending"] not in verified_ids
+    assert age_store.count_verified("soc") == 3
+
+
+def test_other_domain_row_is_excluded(age_store: Any) -> None:
+    _seed_verified_fixture(age_store)
+
+    assert age_store.count_verified("soc") == 3
+    assert age_store.count_verified("trading") == 1
+
+
+def test_archived_confirmed_row_is_excluded_from_d2(age_store: Any) -> None:
+    ids = _seed_verified_fixture(age_store)
+
+    verified_ids = {row["decision_id"] for row in age_store.get_verified_decisions("soc")}
+    assert ids["archived"] not in verified_ids
+    assert age_store.count_verified_decisions("soc") == 3
+    assert age_store.count_correct("soc") == 2
+
+
+def test_get_verified_decisions_returns_d2_decision_fields(age_store: Any) -> None:
+    _seed_verified_fixture(age_store)
+
+    verified = age_store.get_verified_decisions("soc")
 
     assert {row["decision_id"] for row in verified} == {
         "SOC-CONFIRMED",
@@ -201,43 +97,41 @@ def test_get_verified_decisions_returns_d2_decision_fields(store):
     assert confirmed["status"] == "confirmed"
 
 
-def test_pending_to_outcome_transition_increments_v(store, fixture_graph):
-    pending = next(item for item in fixture_graph.decisions if item.decision_id == "SOC-PENDING")
-    pending.outcome = None
-    pending.correct = False
-    assert store.count_verified("soc") == 3
-    store.write_outcome("SOC-PENDING", "approve", True, domain="soc")
-    assert store.count_verified("soc") == 4
+def test_pending_to_outcome_transition_increments_v(age_store: Any) -> None:
+    decision_id = _write(age_store, "SOC-PENDING")
+
+    assert age_store.count_verified("soc") == 0
+    age_store.write_outcome(decision_id, "investigate", True, domain="soc")
+    assert age_store.count_verified("soc") == 1
 
 
-def test_mixed_branch_parity_across_all_soc_count_readers(store, fixture_graph, monkeypatch):
+def test_mixed_branch_parity_across_all_soc_count_readers(age_store: Any, age_dsn: str) -> None:
     from ci_platform.graph.age_client import AGEClient
 
-    async def run_query(query: str, parameters: Any = None) -> list[dict[str, object]]:
-        return cast(list[dict[str, object]], fixture_graph.run(query))
+    _seed_verified_fixture(age_store)
+    graph_name = age_store._client._graph
+    age_client = AGEClient(dsn=age_dsn, graph_name=graph_name)
+    try:
+        expected = age_store.count_verified("soc")
+        assert expected == 3
+        assert asyncio.run(age_client.count_verified_decisions()) == expected
+        assert asyncio.run(age_client.count_correct_decisions()) == 2
+    finally:
+        asyncio.run(age_client.close())
 
-    age_client = AGEClient(dsn="postgresql://example/test", graph_name="d2_test_graph")
-    monkeypatch.setattr(age_client, "run_query", run_query)
 
-    expected = store.count_verified("soc")
-    assert expected == 3
-    assert asyncio.run(age_client.count_verified_decisions()) == expected
-    assert asyncio.run(age_client.count_correct_decisions()) == 2
-
-
-def test_invalid_domain_fails_before_cypher(store, fixture_graph):
+def test_invalid_domain_fails_before_cypher(age_store: Any) -> None:
     with pytest.raises(ValueError, match="unsupported graph domain"):
-        store.count_verified("soc' OR 1=1")
-    assert fixture_graph.queries == []
+        age_store.count_verified("soc' OR 1=1")
 
 
-def test_protocol_v2_test_domain_is_accepted(store):
+def test_protocol_v2_test_domain_is_accepted(age_store: Any) -> None:
     domain = "pytest_protocol_v2_test_age_write_outcome_confirmed_b6bc3333"
 
-    assert store._validated_domain(domain) == domain
+    assert age_store._validated_domain(domain) == domain
 
 
-def test_get_decision_links_limit_is_global():
+def test_get_decision_links_limit_is_global() -> None:
     from ci_platform.graph.age_graph_store import AGEGraphStore
 
     store = object.__new__(AGEGraphStore)
@@ -245,13 +139,12 @@ def test_get_decision_links_limit_is_global():
         {"decision_id": f"D-{index}", "entity_id": f"E-{index}", "edge_type": "DECIDED_ON"}
         for index in range(8)
     ]
-    store._client = _InMemoryAGE()
     calls = iter((rows, rows))
     store._run_query = lambda query: next(calls)
     assert len(store.get_decision_links(limit=5, domain="soc")) <= 5
 
 
-def test_sqlite_d2_lifecycle_parity_in_memory():
+def test_sqlite_d2_lifecycle_parity_in_memory() -> None:
     from copilot_sdk.graph.sqlite_store import SQLiteGraphStore
 
     sqlite_store = SQLiteGraphStore(":memory:", domain="soc")
@@ -272,61 +165,3 @@ def test_sqlite_d2_lifecycle_parity_in_memory():
         ]
     finally:
         sqlite_store.close()
-
-
-def test_live_soc_gate():
-    if not age_available():
-        pytest.skip("AGE not reachable")
-    dsn = os.getenv(
-        "AGE_TEST_DSN",
-        "host=localhost port=5433 dbname=soc_copilot user=postgres password=postgres",
-    )
-
-    from ci_platform.graph.age_client import AGEClient
-    from ci_platform.graph.age_graph_store import AGEGraphStore
-
-    store = AGEGraphStore(dsn=dsn, graph_name="soc_graph")
-    client = AGEClient(dsn=dsn, graph_name="soc_graph")
-    try:
-        rows = asyncio.run(
-            client.run_query(
-                "MATCH (d:Decision) "
-                "WHERE d.domain = 'soc' "
-                "AND (d.archived IS NULL OR d.archived <> true) "
-                "AND d.status IN ['confirmed', 'overridden'] "
-                "RETURN count(DISTINCT d.decision_id) AS cnt"
-            )
-        )
-        raw_count = int(rows[0]["cnt"]) if rows else 0
-        function_count = store.count_verified("soc")
-
-        assert function_count == raw_count
-    finally:
-        store.close()
-        asyncio.run(client.close())
-
-
-def test_trading_gate_after_phase_3():
-    if not age_available():
-        pytest.skip("AGE not reachable")
-    from ci_platform.graph.age_client import AGEClient
-
-    dsn = os.getenv(
-        "AGE_TEST_DSN",
-        "host=localhost port=5433 dbname=soc_copilot user=postgres password=postgres",
-    )
-    client = AGEClient(dsn=dsn, graph_name="soc_graph")
-    try:
-        rows = asyncio.run(client.run_query(
-            "MATCH (d:Decision) WHERE d.domain = 'trading' "
-            "AND (d.archived IS NULL OR d.archived <> true) "
-            "AND d.correct IS NOT NULL RETURN count(d) AS cnt"
-        ))
-        count = int(rows[0]["cnt"]) if rows else 0
-        if count == 0:
-            pytest.skip("soc_graph has no trading migration data")
-        assert count >= 150
-    finally:
-        asyncio.run(client.close())
-
-

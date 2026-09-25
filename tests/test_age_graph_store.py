@@ -15,11 +15,13 @@ class FakeTransaction:
 
     def run_cypher(self, query):
         self.cypher.append(query)
+        if "CREATE (" in query or "MERGE (" in query or "MATCH (d)-[:" in query:
+            return [{"ok": True}]
         return []
 
 
 class FakeAGEClient:
-    instances = []
+    instances: list["FakeAGEClient"] = []
 
     def __init__(self, dsn=None, graph_name=None):
         self.dsn = dsn
@@ -28,6 +30,7 @@ class FakeAGEClient:
         self.queries = []
         self.responses = []
         self.transactions = []
+        self.rolled_back_transactions = []
         self.closed = False
         self.s_calls = []
         FakeAGEClient.instances.append(self)
@@ -50,7 +53,11 @@ class FakeAGEClient:
 
     async def run_transaction(self, fn):
         tx = FakeTransaction()
-        result = fn(tx)
+        try:
+            result = fn(tx)
+        except Exception:
+            self.rolled_back_transactions.append(tx)
+            raise
         self.transactions.append(tx)
         return result
 
@@ -131,6 +138,19 @@ def test_age_graph_store_importable():
     from ci_platform.graph import AGEGraphStore
 
     assert AGEGraphStore is not None
+
+
+def test_decision_movement_uses_bounded_directed_edge_queries(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    assert store.decision_movement("trading", "TRD-1") == []
+
+    queries = [query for query, _parameters in FakeAGEClient.instances[-1].queries]
+    assert len(queries) == 2
+    assert all("LIMIT 50" in query for query in queries)
+    assert all("[*" not in query for query in queries)
+    assert any("-[r]->(e)" in query for query in queries)
+    assert any("(e)-[r]->" in query for query in queries)
 
 
 def test_age_graph_store_has_graphstore_methods():
@@ -302,11 +322,12 @@ def test_write_decision_uses_no_param_placeholders(fake_age_client):
     )
 
     assert re.match(r"DEC-[0-9a-f]{8}", decision_id)
-    query, parameters = FakeAGEClient.instances[0].queries[0]
-    assert parameters is None
+    transaction_queries = FakeAGEClient.instances[0].transactions[0].cypher
+    query = transaction_queries[0]
     assert "$" not in query
     assert "ON CREATE SET" not in query
-    assert "MERGE" not in query
+    assert any("IN_DOMAIN" in item for item in transaction_queries)
+    assert any("IN_CATEGORY" in item for item in transaction_queries)
 
 
 def test_write_decision_sets_pending_status_and_domain(fake_age_client):
@@ -321,8 +342,8 @@ def test_write_decision_sets_pending_status_and_domain(fake_age_client):
         metadata={"source": "unit"},
     )
 
-    query, parameters = FakeAGEClient.instances[0].queries[0]
-    assert parameters is None
+    transaction_queries = FakeAGEClient.instances[0].transactions[0].cypher
+    query = transaction_queries[0]
     assert "CREATE (d:Decision" in query
     assert "domain: 'trading'" in query
     assert "status: 'pending'" in query
@@ -330,7 +351,7 @@ def test_write_decision_sets_pending_status_and_domain(fake_age_client):
     assert "recommended_action: 'strong_execution'" in query
     assert "factors:" in query
     assert "metadata:" in query
-    assert "MERGE" not in query
+    assert any("IN_CATEGORY" in item for item in transaction_queries)
 
 
 def test_decision_domain_not_null_for_runtime_write(fake_age_client):
@@ -344,9 +365,101 @@ def test_decision_domain_not_null_for_runtime_write(fake_age_client):
         factors={"impact_scope": 0.95},
     )
 
-    query = FakeAGEClient.instances[0].queries[0][0]
+    query = FakeAGEClient.instances[0].transactions[0].cypher[0]
     assert "domain: 'dataops'" in query
     assert "domain: null" not in query
+
+
+def test_write_decision_commits_all_required_nodes_and_edges(fake_age_client):
+    store = _new_store(fake_age_client)
+    decision_id = store.write_decision(
+        "soc",
+        category="duplicate_risk",
+        action="review",
+        confidence=0.8,
+        factors={"risk": 0.7},
+        metadata={"decision_id": "DEC-ATOMIC-1"},
+    )
+
+    client = FakeAGEClient.instances[0]
+    assert decision_id == "DEC-ATOMIC-1"
+    assert len(client.transactions) == 1
+    committed = "\n".join(client.transactions[0].cypher)
+    assert "CREATE (d:Decision" in committed
+    assert "IN_DOMAIN" in committed
+    assert "IN_CATEGORY" in committed
+    assert "HAS_FACTOR_VECTOR" in committed
+    assert client.rolled_back_transactions == []
+
+
+def test_write_decision_raises_when_transaction_commit_fails(fake_age_client, monkeypatch):
+    store = _new_store(fake_age_client)
+    client = FakeAGEClient.instances[0]
+
+    async def fail_commit(operation):
+        operation(FakeTransaction())
+        raise RuntimeError("commit confirmation failed")
+
+    monkeypatch.setattr(client, "run_transaction", fail_commit)
+    with pytest.raises(RuntimeError, match="commit confirmation failed"):
+        store.write_decision(
+            "soc",
+            category="duplicate_risk",
+            action="review",
+            confidence=0.8,
+            factors={},
+            metadata={"decision_id": "DEC-COMMIT-FAIL"},
+        )
+
+
+def test_write_decision_rolls_back_node_when_edge_creation_fails(fake_age_client, monkeypatch):
+    store = _new_store(fake_age_client)
+
+    def fail_category_edge(**_kwargs):
+        raise RuntimeError("category edge failure")
+
+    monkeypatch.setattr(store, "_link_decision_to_category", fail_category_edge)
+    with pytest.raises(RuntimeError, match="category edge failure"):
+        store.write_decision(
+            "soc",
+            category="duplicate_risk",
+            action="review",
+            confidence=0.8,
+            factors={"risk": 0.7},
+            metadata={"decision_id": "DEC-ROLLBACK-1"},
+        )
+
+    client = FakeAGEClient.instances[0]
+    assert client.transactions == []
+    assert len(client.rolled_back_transactions) == 1
+    rolled_back = "\n".join(client.rolled_back_transactions[0].cypher)
+    assert "CREATE (d:Decision" in rolled_back
+
+
+def test_outcome_centroid_atomic_rolls_back_outcome_on_centroid_failure(fake_age_client, monkeypatch):
+    store = _new_store(fake_age_client)
+
+    def fail_centroid(**_kwargs):
+        raise RuntimeError("centroid write failure")
+
+    monkeypatch.setattr(store, "_update_centroid_impl", fail_centroid)
+    with pytest.raises(RuntimeError, match="centroid write failure"):
+        store.write_outcome_and_update_centroid(
+            decision_id="DEC-ATOMIC-OUTCOME",
+            actual_action="review",
+            is_correct=False,
+            domain="soc",
+            category="duplicate_risk",
+            action="review",
+            centroid_vector=[0.1, 0.2],
+            delta_norm=0.3,
+        )
+
+    client = FakeAGEClient.instances[0]
+    assert client.transactions == []
+    assert len(client.rolled_back_transactions) == 1
+    rolled_back = "\n".join(client.rolled_back_transactions[0].cypher)
+    assert "CREATE (o:Outcome" in rolled_back
 
 
 def test_write_decision_then_outcome_lifecycle_matches_pending_guard(fake_age_client):
@@ -363,7 +476,8 @@ def test_write_decision_then_outcome_lifecycle_matches_pending_guard(fake_age_cl
 
     store.write_outcome(decision_id, "order_as_planned", True, domain="purchasing")
 
-    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    client = FakeAGEClient.instances[0]
+    queries = list(client.transactions[0].cypher) + [query for query, _ in client.queries]
     assert any("status: 'pending'" in query for query in queries)
     outcome_query = next(query for query in queries if "AND d.status = 'pending'" in query)
     assert "SET d.status = 'confirmed'" in outcome_query
@@ -502,7 +616,7 @@ def test_write_decision_no_entity_falls_back_to_standalone(fake_age_client):
         {},
     )
 
-    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    queries = FakeAGEClient.instances[0].transactions[0].cypher
     decision_query = next(query for query in queries if "CREATE (d:Decision" in query)
     assert "MATCH (e {entity_id:" not in decision_query
     assert "DECIDED_ON" not in decision_query
@@ -521,7 +635,7 @@ def test_write_decision_with_entity_creates_edge_in_same_query(fake_age_client):
         metadata={"entity_id": "ENT-1"},
     )
 
-    queries = [query for query, _ in FakeAGEClient.instances[0].queries]
+    queries = FakeAGEClient.instances[0].transactions[0].cypher
     decision_query = next(query for query in queries if "CREATE (d:Decision" in query)
     assert "CREATE (d)-[:DECIDED_ON]->(e)" in decision_query
 
@@ -2151,7 +2265,7 @@ class TestAGEGraphStoreLive:
             conn.execute("SET search_path = ag_catalog, '$user', public")
             conn.execute("SELECT drop_graph(%s, true)", (cls.graph_name,))
 
-    def test_live_write_decision_returns_id(self):
+    def test_live_write_decision_commits_and_is_queryable(self):
         from ci_platform.graph import AGEGraphStore
 
         store = AGEGraphStore(dsn=GRAPH_DSN, graph_name=self.graph_name)
@@ -2164,6 +2278,9 @@ class TestAGEGraphStoreLive:
             metadata={"entity_id": "LIVE-ENT-1"},
         )
         assert decision_id.startswith("DEC-")
+        persisted = store.get_decision(decision_id, domain="soc")
+        assert persisted is not None
+        assert persisted["domain"] == "soc"
         store.close()
 
     def test_live_outcome_and_counts(self):
