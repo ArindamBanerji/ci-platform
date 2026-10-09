@@ -7,18 +7,20 @@ from typing import Any
 
 import pytest
 
+from ci_platform.graph.age_graph_store import AGEGraphStore
+
 
 pytestmark = pytest.mark.age
 
 
 def _write(
-    store: Any,
+    store: AGEGraphStore,
     decision_id: str,
     domain: str = "soc",
     *,
     category: str = "credential_access",
 ) -> str:
-    return store.write_decision(
+    decision = store.write_decision(
         domain,
         category,
         "investigate",
@@ -26,15 +28,18 @@ def _write(
         {"signal": 1.0},
         metadata={"decision_id": decision_id},
     )
+    assert isinstance(decision, str)
+    return decision
 
 
 def _seed_verified_fixture(store: Any) -> dict[str, str]:
+    # Archive the genuinely oldest record, not the lexically first ID.
     ids = {
+        "archived": _write(store, "SOC-ARCHIVED"),
         "confirmed": _write(store, "SOC-CONFIRMED"),
         "overridden": _write(store, "SOC-OVERRIDDEN"),
         "confirmed_outcome": _write(store, "SOC-CONFIRMED-OUTCOME"),
         "pending": _write(store, "SOC-PENDING"),
-        "archived": _write(store, "SOC-ARCHIVED"),
         "other": _write(store, "OTHER-CONFIRMED", "trading"),
     }
     store.write_outcome(ids["confirmed"], "investigate", True, domain="soc")
@@ -131,37 +136,38 @@ def test_protocol_v2_test_domain_is_accepted(age_store: Any) -> None:
     assert age_store._validated_domain(domain) == domain
 
 
-def test_get_decision_links_limit_is_global() -> None:
+def test_get_decision_links_limit_is_global(monkeypatch: pytest.MonkeyPatch) -> None:
     from ci_platform.graph.age_graph_store import AGEGraphStore
 
     store = object.__new__(AGEGraphStore)
+    monkeypatch.setattr(store, "_S", lambda value: f"'{value}'" if isinstance(value, str) else str(value))
     rows = [
         {"decision_id": f"D-{index}", "entity_id": f"E-{index}", "edge_type": "DECIDED_ON"}
         for index in range(8)
     ]
     calls = iter((rows, rows))
-    store._run_query = lambda query: next(calls)
+    monkeypatch.setattr(store, "_run_query", lambda query: next(calls))
     assert len(store.get_decision_links(limit=5, domain="soc")) <= 5
 
 
-def test_sqlite_d2_lifecycle_parity_in_memory() -> None:
-    from copilot_sdk.graph.sqlite_store import SQLiteGraphStore
+def test_in_memory_d2_lifecycle_contract() -> None:
+    from copilot_sdk.graph import InMemoryGraphStore
 
-    sqlite_store = SQLiteGraphStore(":memory:", domain="soc")
+    store = InMemoryGraphStore(domain="soc")
     try:
-        confirmed_id = sqlite_store.write_decision(
+        confirmed_id = store.write_decision(
             "soc", "price_variance", "hold_for_review", 0.7, {"variance": 0.2}
         )
-        sqlite_store.write_outcome(confirmed_id, "hold_for_review", True, domain="soc")
-        sqlite_store.write_decision(
+        store.write_outcome(confirmed_id, "hold_for_review", True, domain="soc")
+        store.write_decision(
             "soc", "price_variance", "hold_for_review", 0.6, {"variance": 0.1}
         )
 
-        assert sqlite_store.count_verified("soc") == 1
-        assert sqlite_store.count_verified_decisions("soc") == 1
-        assert sqlite_store.count_correct("soc") == 1
-        assert [row["decision_id"] for row in sqlite_store.get_verified_decisions("soc")] == [
+        assert store.count_verified("soc") == 1
+        assert store.count_verified_decisions("soc") == 1
+        assert store.count_correct("soc") == 1
+        assert [row["decision_id"] for row in store.get_verified_decisions("soc")] == [
             confirmed_id
         ]
     finally:
-        sqlite_store.close()
+        store.close()

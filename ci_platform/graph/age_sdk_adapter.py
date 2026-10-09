@@ -25,6 +25,11 @@ class AGEGraphStoreAdapter:
         self._store = store
         self.domain = str(domain)
 
+    @property
+    def production_ready(self) -> bool:
+        """Satisfies ProductionReadyStore protocol for production classification."""
+        return True
+
     def generate_decision_id(self, domain: str) -> str:
         """Generate a bare AGE decision ID; the primary owns prefix policy."""
         return uuid.uuid4().hex[:12]
@@ -701,8 +706,25 @@ class AGEGraphStoreAdapter:
             decision_id=str(entity_id), limit=int(limit), domain=domain
         )
 
-    def decision_movement(self, domain: str, decision_id: str) -> list[dict[str, Any]]:
-        return self._store.decision_movement(domain, decision_id)
+    def decision_movement(
+        self,
+        domain: str,
+        decision_id: str,
+        *,
+        outbound_skip: int = 0,
+        inbound_skip: int = 0,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]],
+            self._store.decision_movement(
+                domain,
+                decision_id,
+                outbound_skip=outbound_skip,
+                inbound_skip=inbound_skip,
+                limit=limit,
+            ),
+        )
 
     def contextual_judgment(
         self, domain: str, entity_group: str, category: str

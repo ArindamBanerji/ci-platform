@@ -278,9 +278,76 @@ def test_adapter_method_signatures_match_protocol():
     for method_name in protocol_methods:
         protocol_signature = inspect.signature(getattr(GraphStore, method_name))
         adapter_signature = inspect.signature(getattr(AGEGraphStoreAdapter, method_name))
-        assert list(adapter_signature.parameters) == list(protocol_signature.parameters)
+        protocol_names = list(protocol_signature.parameters)
+        adapter_names = list(adapter_signature.parameters)
+        if method_name == "decision_movement":
+            assert adapter_names[:len(protocol_names)] == protocol_names
+            assert adapter_names[len(protocol_names):] == [
+                "outbound_skip", "inbound_skip", "limit",
+            ]
+        else:
+            assert adapter_names == protocol_names
         for name, parameter in protocol_signature.parameters.items():
             assert adapter_signature.parameters[name].default == parameter.default
+
+
+def test_adapter_forwards_movement_pagination_kwargs(monkeypatch):
+    from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
+
+    backing = object.__new__(__import__("ci_platform.graph.age_graph_store", fromlist=["AGEGraphStore"]).AGEGraphStore)
+    calls = []
+    monkeypatch.setattr(
+        backing,
+        "decision_movement",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or [],
+    )
+    adapter = AGEGraphStoreAdapter(store=backing)
+    adapter.decision_movement(
+        "trading", "decision-1", outbound_skip=100, inbound_skip=200, limit=25
+    )
+    assert calls == [(("trading", "decision-1"), {
+        "outbound_skip": 100, "inbound_skip": 200, "limit": 25,
+    })]
+
+
+def test_adapter_movement_defaults_match_backend(monkeypatch):
+    from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
+    from ci_platform.graph.age_graph_store import AGEGraphStore
+
+    backing = object.__new__(AGEGraphStore)
+    calls = []
+    monkeypatch.setattr(
+        backing,
+        "decision_movement",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or [],
+    )
+    adapter = AGEGraphStoreAdapter(store=backing)
+    adapter.decision_movement("trading", "decision-1")
+    assert calls == [(("trading", "decision-1"), {
+        "outbound_skip": 0, "inbound_skip": 0, "limit": 50,
+    })]
+
+
+def test_adapter_path_signatures_unchanged(monkeypatch):
+    from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
+    from ci_platform.graph.age_graph_store import AGEGraphStore
+
+    backing = object.__new__(AGEGraphStore)
+    calls = []
+    for method_name in ("query_context", "contextual_judgment", "promotion_basis"):
+        monkeypatch.setattr(
+            backing,
+            method_name,
+            lambda *args, _method=method_name, **kwargs: calls.append((_method, args, kwargs)) or [],
+        )
+    adapter = AGEGraphStoreAdapter(store=backing)
+    adapter.query_context("entity-1", 2, domain="trading")
+    adapter.contextual_judgment("trading", "entity-1", "risk")
+    adapter.promotion_basis("trading", "rule-1")
+    assert [name for name, _args, _kwargs in calls] == [
+        "query_context", "contextual_judgment", "promotion_basis",
+    ]
+    assert all("_scan_cap" not in kwargs for _name, _args, kwargs in calls)
 
 
 def test_adapter_satisfies_sdk_protocol_with_fake_store():
@@ -291,6 +358,18 @@ def test_adapter_satisfies_sdk_protocol_with_fake_store():
     adapter = AGEGraphStoreAdapter(store=FakeGraphStore())
 
     assert isinstance(adapter, GraphStore)
+
+
+def test_adapter_has_production_ready_property():
+    pytest.importorskip("copilot_sdk.graph.protocol")
+    from ci_platform.graph.age_sdk_adapter import AGEGraphStoreAdapter
+    from copilot_sdk.graph.protocol import ProductionReadyStore
+
+    adapter = AGEGraphStoreAdapter(store=FakeGraphStore())
+
+    assert hasattr(adapter, "production_ready")
+    assert adapter.production_ready is True
+    assert isinstance(adapter, ProductionReadyStore)
 
 
 def test_adapter_requires_dsn_without_store():

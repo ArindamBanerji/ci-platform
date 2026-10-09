@@ -143,7 +143,6 @@ class AGEGraphStore:
             raise ValueError("platform state requires non-empty domain and key")
         payload = json.dumps(dict(state), sort_keys=True, default=str)
         where = f"domain: {self._S(str(domain))}, state_key: {self._S(str(key))}"
-        self._run_query(f"MATCH (n:{label} {{{where}}}) DELETE n")
         props = (
             "{"
             f"domain: {self._S(str(domain))}, "
@@ -152,7 +151,11 @@ class AGEGraphStore:
             f"updated_at: {self._S(datetime.now(timezone.utc).timestamp())}"
             "}"
         )
-        self._run_query(f"CREATE (n:{label} {props}) RETURN n")
+        def replace_state(transaction: AGETransaction) -> None:
+            transaction.run_cypher(f"MATCH (n:{label} {{{where}}}) DELETE n")
+            transaction.run_cypher(f"CREATE (n:{label} {props}) RETURN n")
+
+        self._run(self._client.run_transaction(replace_state))
 
     def _get_platform_state(
         self, label: str, domain: str, key: str
@@ -389,6 +392,7 @@ class AGEGraphStore:
                     if transaction is not None:
                         raise
                     log.warning("%s edge creation failed for identity=%s target=%s: %s", edge_type, identity, edge_target_id, exc)
+                    raise
 
     @staticmethod
     def _safe_limit(limit: int, default: int = 400) -> int:
@@ -836,6 +840,7 @@ class AGEGraphStore:
             confidence_value,
             factors_json,
             metadata_json,
+            float(metadata_dict.get("created_at", time.time())),
         )
         if not entity_id:
             rows = run_query(f"CREATE (d:Decision {props}) RETURN d")
@@ -1164,6 +1169,7 @@ class AGEGraphStore:
         confidence: float,
         factors_json: str,
         metadata_json: str,
+        created_at: float,
     ) -> str:
         return (
             "{"
@@ -1175,6 +1181,7 @@ class AGEGraphStore:
             f"confidence: {confidence}, "
             f"factors: {self._S(factors_json)}, "
             f"metadata: {self._S(metadata_json)}, "
+            f"created_at: {created_at}, "
             "status: 'pending'"
             "}"
         )
@@ -2402,6 +2409,7 @@ class AGEGraphStore:
             f"min_shadow_batches: {self._S(payload['min_shadow_batches'])}, "
             f"metadata: {self._S(payload['metadata_json'])}, "
             "schema_version: 'protocol_v2', "
+            f"timestamp: {self._S(str((metadata or {}).get('timestamp') or datetime.now(timezone.utc).isoformat()))}, "
             f"created_at: {float(created_at)}"
             "}"
         )
@@ -3345,7 +3353,8 @@ class AGEGraphStore:
             centroids = centroids.tolist()
         centroids_json = json.dumps(centroids, sort_keys=True)
         metadata_json = json.dumps(metadata or {}, sort_keys=True)
-        created_at = time.time()
+        created_at = float(kwargs.get("created_at", time.time()))
+        decisions_count = kwargs.get("decisions_count")
         props = (
             "{"
             f"decision_id: {self._S(decision_id)}, "
@@ -3354,8 +3363,16 @@ class AGEGraphStore:
             f"centroids: {self._S(centroids_json)}, "
             f"metadata: {self._S(metadata_json)}, "
             f"created_at: {self._S(created_at)}"
-            "}"
         )
+        if decisions_count is not None:
+            props += f", decisions_count: {self._S(decisions_count)}"
+        for key in ("decision_time_start", "decision_time_end", "checkpoint_time"):
+            value = kwargs.get(key)
+            if value is not None:
+                props += f", {key}: {self._S(value)}"
+        if metadata is not None and "iks" in metadata:
+            props += f", iks: {self._S(float(metadata['iks']))}"
+        props += "}"
         if decision_id:
             query = f"""
             MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
@@ -3613,7 +3630,12 @@ class AGEGraphStore:
         )[1]
 
     def get_evolution_events(self, domain: str, **kwargs: Any) -> List[Dict[str, Any]]:
-        limit = self._safe_limit(kwargs.pop("limit", 100), default=100)
+        requested_limit = kwargs.pop("limit", 100)
+        # Explicit None is the protocol's unbounded read, used to replay events.
+        limit_clause = (
+            "" if requested_limit is None
+            else f"LIMIT {self._safe_limit(requested_limit, default=100)}"
+        )
         clauses = [f"e.domain = {self._S(domain)}"]
         for key in ("event_type", "rule_name", "variant_id"):
             value = kwargs.get(key)
@@ -3626,7 +3648,7 @@ class AGEGraphStore:
             {where_clause}
             RETURN e
             ORDER BY e.timestamp DESC
-            LIMIT {limit}
+            {limit_clause}
             """
         )
         return [self._node_to_dict(row.get("e", row)) for row in rows]
@@ -3643,6 +3665,15 @@ class AGEGraphStore:
             raise ValueError("AGEGraphStore prune requires a configured DSN")
         with psycopg.connect(dsn) as conn:
             conn.execute("SET statement_timeout = '120s'")
+            # Fresh graphs need not have either label yet. Check catalog presence
+            # without swallowing permission, connection, or query errors.
+            labels = conn.execute(
+                "SELECT to_regclass(%s), to_regclass(%s)", (event_table, edge_table)
+            ).fetchone()
+            if labels is None:
+                raise RuntimeError("AGE label catalog query returned no row")
+            if labels[0] is None:
+                return 0
             non_proof = conn.execute(
                 f"""
                 SELECT count(*)
@@ -3680,6 +3711,7 @@ class AGEGraphStore:
                     FROM {event_table}
                     WHERE {props}->>'domain' = %s
                       AND {props}->>'event_type' = 'proof_record'
+                    ORDER BY id
                     LIMIT %s
                     """,
                     (domain_value, batch_size),
@@ -3687,13 +3719,14 @@ class AGEGraphStore:
                 if inserted <= 0:
                     conn.commit()
                     break
-                conn.execute(
-                    f"""
-                    DELETE FROM {edge_table} r
-                    USING evolution_prune_ids v
-                    WHERE r.end_id::text = v.id::text
-                    """
-                )
+                if labels[1] is not None:
+                    conn.execute(
+                        f"""
+                        DELETE FROM {edge_table} r
+                        USING evolution_prune_ids v
+                        WHERE r.end_id::text = v.id::text
+                        """
+                    )
                 deleted = conn.execute(
                     f"""
                     DELETE FROM {event_table} e
@@ -3858,6 +3891,11 @@ class AGEGraphStore:
                 "L5ConservationState",
                 "EvolutionEvent",
                 "TransferPattern",
+                "EvolutionState",
+                "PosteriorState",
+                "PromotionState",
+                "CompoundingLedger",
+                "GovernanceState",
             ):
                 self._delete_domain_label(tx, label, domain)
 
@@ -3983,7 +4021,9 @@ class AGEGraphStore:
         hops: int = 2,
         *,
         domain: str,
+        _scan_cap: int = 100,
     ) -> List[Dict[str, Any]]:
+        safe_scan_cap = max(100, min(int(_scan_cap), 1000))
         hop_count = self._safe_hops(hops)
         domain_value = self._validated_domain(domain)
         # Every vertex, including the root and intermediates, must be scoped.
@@ -3995,26 +4035,38 @@ class AGEGraphStore:
             WHERE e.domain = {literal} AND n.domain = {literal}
               AND size([v IN nodes(p) WHERE properties(v)['domain'] = {literal} | v]) = length(p) + 1
             RETURN p
-            LIMIT 100
+            LIMIT {safe_scan_cap}
             """
         )
         return [self._node_to_dict(row) for row in rows]
 
-    def decision_movement(self, domain: str, decision_id: str) -> List[Dict[str, Any]]:
+    def decision_movement(
+        self,
+        domain: str,
+        decision_id: str,
+        *,
+        outbound_skip: int = 0,
+        inbound_skip: int = 0,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 50))
+        safe_outbound_skip = max(0, min(int(outbound_skip), 450))
+        safe_inbound_skip = max(0, min(int(inbound_skip), 450))
         domain_value = self._validated_domain(domain)
         decision_literal = self._S(str(decision_id))
         domain_literal = self._S(domain_value)
         rows: List[Dict[str, Any]] = []
-        for direction, pattern in (
-            ("outbound", f"(d:Decision {{decision_id: {decision_literal}}})-[r]->(e)"),
-            ("inbound", f"(e)-[r]->(d:Decision {{decision_id: {decision_literal}}})"),
+        for direction, pattern, safe_skip in (
+            ("outbound", f"(d:Decision {{decision_id: {decision_literal}}})-[r]->(e)", safe_outbound_skip),
+            ("inbound", f"(e)-[r]->(d:Decision {{decision_id: {decision_literal}}})", safe_inbound_skip),
         ):
             linked = self._run_query(f"""
                 MATCH {pattern}
                 WHERE d.domain = {domain_literal}
                   AND (e.domain = {domain_literal} OR e.domain IS NULL)
                 RETURN d, r, e
-                LIMIT 50
+                ORDER BY id(r)
+                SKIP {safe_skip} LIMIT {safe_limit}
             """)
             rows.extend(
                 {
@@ -4028,8 +4080,9 @@ class AGEGraphStore:
         return rows
 
     def contextual_judgment(
-        self, domain: str, entity_group: str, category: str
+        self, domain: str, entity_group: str, category: str, *, _scan_cap: int = 100
     ) -> List[Dict[str, Any]]:
+        safe_scan_cap = max(100, min(int(_scan_cap), 1000))
         domain_value = self._validated_domain(domain)
         rows = self._run_query(f"""
             MATCH p=(e)-[*1..3]-(j:Decision)
@@ -4037,11 +4090,12 @@ class AGEGraphStore:
               AND j.category = {self._S(str(category))}
               AND (e.entity_group = {self._S(str(entity_group))}
                    OR e.entity_id = {self._S(str(entity_group))})
-            RETURN p LIMIT 100
+            RETURN p LIMIT {safe_scan_cap}
         """)
         return [self._node_to_dict(row) for row in rows]
 
-    def promotion_basis(self, domain: str, rule_id: str) -> List[Dict[str, Any]]:
+    def promotion_basis(self, domain: str, rule_id: str, *, _scan_cap: int = 100) -> List[Dict[str, Any]]:
+        safe_scan_cap = max(100, min(int(_scan_cap), 1000))
         domain_value = self._validated_domain(domain)
         rows = self._run_query(f"""
             MATCH p=(r)-[*0..3]-(j)
@@ -4050,7 +4104,7 @@ class AGEGraphStore:
                    OR r.source_rule = {self._S(str(rule_id))}
                    OR r.target_rule = {self._S(str(rule_id))})
               AND (j.domain = {self._S(domain_value)} OR j.domain IS NULL)
-            RETURN p LIMIT 100
+            RETURN p LIMIT {safe_scan_cap}
         """)
         return [self._node_to_dict(row) for row in rows]
 
@@ -4088,7 +4142,7 @@ class AGEGraphStore:
         predicate = ""
         if domain is not None:
             predicate = f" WHERE f.domain = {self._S(self._validated_domain(domain))}"
-        rows = self._run_query(f"MATCH (f:Fingerprint){predicate} RETURN f LIMIT 500")
+        rows = self._run_query(f"MATCH (f:Fingerprint){predicate} RETURN f")
         result: List[Dict[str, Any]] = []
         for row in rows:
             node = self._node_to_dict(row.get("f", row))

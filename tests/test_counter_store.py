@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import pytest
@@ -13,18 +12,18 @@ from ci_platform.copilot_core.counters import (
 )
 
 
-def _run(coro: Any) -> Any:
-    return asyncio.run(coro)
+async def _run(coro: Any) -> Any:
+    return await coro
 
 
 def _counter_store(age_store: Any) -> AGECounterStore:
     return AGECounterStore(age_store._client)
 
 
-def _seed_user_and_category(
+async def _seed_user_and_category(
     age_store: Any, user_id: str = "U1", category_id: str = "credential_access"
 ) -> None:
-    _run(
+    await _run(
         age_store._client.run_query(
             """
             CREATE (u:User {id: $user_id, domain: 'soc'})
@@ -36,8 +35,8 @@ def _seed_user_and_category(
     )
 
 
-def _user(age_store: Any, user_id: str = "U1") -> dict[str, Any]:
-    rows = _run(
+async def _user(age_store: Any, user_id: str = "U1") -> dict[str, Any]:
+    rows = await _run(
         age_store._client.run_query(
             "MATCH (u:User {id: $user_id}) RETURN u",
             {"user_id": user_id},
@@ -74,7 +73,7 @@ def test_counter_def_rejects_unsafe_cypher_identifiers() -> None:
 @pytest.mark.age
 @pytest.mark.asyncio
 async def test_existing_trusted_counter_bypasses_graph_truth_fallback(age_store: Any) -> None:
-    _seed_user_and_category(age_store)
+    await _seed_user_and_category(age_store)
     await age_store._client.run_query(
         "MATCH (u:User {id: 'U1'}) SET u.sequence_count = 3 RETURN u"
     )
@@ -95,14 +94,14 @@ async def test_existing_trusted_counter_bypasses_graph_truth_fallback(age_store:
 async def test_cumulative_counter_updates_entity_property_under_advisory_lock(
     age_store: Any,
 ) -> None:
-    _seed_user_and_category(age_store)
+    await _seed_user_and_category(age_store)
     store = _counter_store(age_store)
     counter = soc_sequence_counter_def("U1")
 
     read = await store.increment_cumulative(counter)
 
     assert read.value == 1
-    assert _user(age_store)["sequence_count"] == 1
+    assert (await _user(age_store))["sequence_count"] == 1
     assert read.status == "materialized_property"
 
 
@@ -111,7 +110,7 @@ async def test_cumulative_counter_updates_entity_property_under_advisory_lock(
 async def test_missing_entity_returns_untrusted_and_falls_back_to_graph_truth(
     age_store: Any,
 ) -> None:
-    _seed_user_and_category(age_store)
+    await _seed_user_and_category(age_store)
     store = _counter_store(age_store)
     counter = soc_sequence_counter_def("MISSING")
 
@@ -131,7 +130,7 @@ async def test_missing_entity_returns_untrusted_and_falls_back_to_graph_truth(
 @pytest.mark.age
 @pytest.mark.asyncio
 async def test_missing_property_falls_back_to_graph_truth(age_store: Any) -> None:
-    _seed_user_and_category(age_store)
+    await _seed_user_and_category(age_store)
     store = _counter_store(age_store)
     counter = soc_sequence_counter_def("U1")
 
@@ -150,7 +149,7 @@ async def test_missing_property_falls_back_to_graph_truth(age_store: Any) -> Non
 @pytest.mark.age
 @pytest.mark.asyncio
 async def test_distinct_counter_creates_only_missing_seen_edge(age_store: Any) -> None:
-    _seed_user_and_category(age_store)
+    await _seed_user_and_category(age_store)
     store = _counter_store(age_store)
     counter = soc_cross_category_counter_def("U1")
 
@@ -171,14 +170,14 @@ async def test_distinct_counter_creates_only_missing_seen_edge(age_store: Any) -
 @pytest.mark.age
 @pytest.mark.asyncio
 async def test_transaction_failure_rolls_back_counter_update(age_store: Any) -> None:
-    _seed_user_and_category(age_store)
+    await _seed_user_and_category(age_store)
     store = _counter_store(age_store)
     counter = soc_sequence_counter_def("U1")
 
     with pytest.raises(ValueError):
         await store.increment_cumulative(soc_sequence_counter_def("MISSING"))
 
-    assert "sequence_count" not in _user(age_store)
+    assert "sequence_count" not in await _user(age_store)
     read = await store.read_counter(counter)
     assert read.status == "missing_property"
 
@@ -186,7 +185,7 @@ async def test_transaction_failure_rolls_back_counter_update(age_store: Any) -> 
 @pytest.mark.age
 @pytest.mark.asyncio
 async def test_reconciliation_corrects_entity_property_from_graph_truth(age_store: Any) -> None:
-    _seed_user_and_category(age_store)
+    await _seed_user_and_category(age_store)
     await age_store._client.run_query(
         "MATCH (u:User {id: 'U1'}) SET u.sequence_count = 2 RETURN u"
     )
@@ -202,7 +201,7 @@ async def test_reconciliation_corrects_entity_property_from_graph_truth(age_stor
     assert reconciliation.graph_truth_value == 1
     assert reconciliation.status == "reconciled_corrected"
     assert reconciliation.read.value == 1
-    assert _user(age_store)["sequence_count"] == 1
+    assert (await _user(age_store))["sequence_count"] == 1
 
 
 def test_disabled_feature_flag_status_does_not_adopt_route_path(monkeypatch: pytest.MonkeyPatch) -> None:

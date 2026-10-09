@@ -153,6 +153,87 @@ def test_decision_movement_uses_bounded_directed_edge_queries(fake_age_client):
     assert any("(e)-[r]->" in query for query in queries)
 
 
+def test_decision_movement_order_by_id_r(fake_age_client):
+    store = _new_store(fake_age_client)
+    store.decision_movement("trading", "TRD-1")
+    queries = [query for query, _parameters in FakeAGEClient.instances[-1].queries]
+    assert len(queries) == 2
+    for query in queries:
+        assert query.index("ORDER BY id(r)") < query.index("SKIP 0") < query.index("LIMIT 50")
+
+
+@pytest.mark.parametrize(
+    ("outbound_skip", "inbound_skip", "limit", "expected_skips", "expected_limit"),
+    [(-5, -2, -5, (0, 0), 1), (999, 999, 200, (450, 450), 50)],
+)
+def test_decision_movement_skip_clamping(
+    fake_age_client, outbound_skip, inbound_skip, limit, expected_skips, expected_limit
+):
+    store = _new_store(fake_age_client)
+    store.decision_movement(
+        "trading", "TRD-1", outbound_skip=outbound_skip,
+        inbound_skip=inbound_skip, limit=limit,
+    )
+    queries = [query for query, _parameters in FakeAGEClient.instances[-1].queries]
+    assert f"SKIP {expected_skips[0]} LIMIT {expected_limit}" in queries[0]
+    assert f"SKIP {expected_skips[1]} LIMIT {expected_limit}" in queries[1]
+
+
+def test_decision_movement_defaults(fake_age_client):
+    store = _new_store(fake_age_client)
+    store.decision_movement("trading", "TRD-1")
+    queries = [query for query, _parameters in FakeAGEClient.instances[-1].queries]
+    assert all("ORDER BY id(r)" in query and "SKIP 0 LIMIT 50" in query for query in queries)
+
+
+def test_path_methods_keep_unordered_cypher(fake_age_client):
+    store = _new_store(fake_age_client)
+    methods = (
+        lambda: store.query_context("entity-1", domain="trading"),
+        lambda: store.contextual_judgment("trading", "entity-1", "risk"),
+        lambda: store.promotion_basis("trading", "rule-1"),
+    )
+    for call in methods:
+        call()
+    queries = [query for query, _parameters in FakeAGEClient.instances[-1].queries]
+    assert len(queries) == 3
+    assert all("ORDER BY" not in query and "SKIP" not in query for query in queries)
+
+
+def test_path_scan_cap_default_and_overscan(fake_age_client):
+    store = _new_store(fake_age_client)
+    methods = (
+        lambda cap: store.query_context("entity-1", domain="trading", _scan_cap=cap),
+        lambda cap: store.contextual_judgment("trading", "entity-1", "risk", _scan_cap=cap),
+        lambda cap: store.promotion_basis("trading", "rule-1", _scan_cap=cap),
+    )
+    for method in methods:
+        method(100)
+        method(1000)
+    queries = [query for query, _parameters in FakeAGEClient.instances[-1].queries]
+    assert len(queries) == 6
+    for query in queries[::2]:
+        assert "LIMIT 100" in query
+    for query in queries[1::2]:
+        assert "LIMIT 1000" in query
+
+
+@pytest.mark.parametrize(("scan_cap", "expected"), [(50, 100), (5000, 1000)])
+def test_path_scan_cap_clamping(fake_age_client, scan_cap, expected):
+    store = _new_store(fake_age_client)
+    store.promotion_basis("trading", "rule-1", _scan_cap=scan_cap)
+    query = FakeAGEClient.instances[-1].queries[-1][0]
+    assert f"LIMIT {expected}" in query
+
+
+def test_path_rows_are_not_python_paginated(fake_age_client):
+    store = _new_store(fake_age_client)
+    rows = [{"p": [{"id": "later"}]}, {"p": [{"id": "earlier"}]}]
+    FakeAGEClient.instances[-1].responses = [rows]
+    result = store.promotion_basis("trading", "rule-1", _scan_cap=1000)
+    assert result == rows
+
+
 def test_age_graph_store_has_graphstore_methods():
     from ci_platform.graph import AGEGraphStore
 
@@ -817,6 +898,59 @@ def test_l5_upsert_missing_edge_target(fake_age_client, caplog):
     assert "SET n.vector_json = '[0.1]'" in queries[1]
     assert "CREATE (n)-[:SHAPED_BY" not in "\n".join(queries)
     assert "edge target not found" in caplog.text
+
+
+def test_l5_upsert_edge_failure_surfaces_after_node_write(fake_age_client, monkeypatch):
+    store = _new_store(fake_age_client)
+    client = FakeAGEClient.instances[0]
+    queries = []
+
+    def fail_edge_creation(query):
+        queries.append(query)
+        if "CREATE (n)-[:SHAPED_BY" in query:
+            raise RuntimeError("edge creation failure")
+        if "MATCH (t:Decision)" in query:
+            return [{"t": {}}]
+        return []
+
+    monkeypatch.setattr(store, "_run_query", fail_edge_creation)
+
+    with pytest.raises(RuntimeError, match="edge creation failure"):
+        store._l5_upsert_current(
+            "L5Centroid",
+            {"domain": "soc", "category": "cat", "action": "act"},
+            {"vector_json": "[0.1]"},
+            edge_type="SHAPED_BY",
+            edge_target_id={"domain": "soc", "decision_id": "DEC-1"},
+        )
+
+    assert "CREATE (n:L5Centroid" in queries[1]
+    assert "CREATE (n)-[:SHAPED_BY" in queries[-1]
+
+
+def test_l5_upsert_transaction_edge_failure_still_reraises(fake_age_client):
+    store = _new_store(fake_age_client)
+
+    class FailingTransaction:
+        def __init__(self):
+            self.queries = []
+
+        def run_cypher(self, query):
+            self.queries.append(query)
+            if "CREATE (n)-[:SHAPED_BY" in query:
+                raise RuntimeError("transaction edge failure")
+            return [{"n": {}}] if "RETURN n" in query else [{"t": {}}]
+
+    transaction = FailingTransaction()
+    with pytest.raises(RuntimeError, match="transaction edge failure"):
+        store._l5_upsert_current(
+            "L5Centroid",
+            {"domain": "soc", "category": "cat", "action": "act"},
+            {"vector_json": "[0.1]"},
+            edge_type="SHAPED_BY",
+            edge_target_id={"domain": "soc", "decision_id": "DEC-1"},
+            transaction=transaction,
+        )
 
 
 def test_l5_upsert_edge_condition_false(fake_age_client):
