@@ -20,6 +20,8 @@ import numpy as np
 import psycopg
 
 from ci_platform.graph.age_client import AGEClient, AGETransaction
+from ci_platform.graph import bounded_projection_migration as bounded
+from copilot_sdk.graph.namespace import is_internal_namespace
 
 
 log = logging.getLogger(__name__)
@@ -77,18 +79,35 @@ class AGEGraphStoreTransaction:
         return self._store._write_decision_impl(transaction=self._transaction, **kwargs)
 
     def write_outcome(self, **kwargs: Any) -> None:
+        domain = kwargs.get("domain")
+        if domain is not None and str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._store._write_outcome_impl(transaction=self._transaction, **kwargs)
 
     def update_centroid(self, **kwargs: Any) -> None:
+        domain = kwargs.get("domain")
+        if domain is not None and str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._store._update_centroid_impl(transaction=self._transaction, **kwargs)
 
     def write_outcome_and_update_centroid(self, **kwargs: Any) -> None:
+        domain = kwargs.get("domain")
+        if domain is not None and str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._store._write_outcome_and_update_centroid_impl(
             transaction=self._transaction, **kwargs
         )
 
     def write_centroid_checkpoint(self, **kwargs: Any) -> None:
+        domain = kwargs.get("domain")
+        if domain is not None and str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._store._write_centroid_checkpoint_impl(transaction=self._transaction, **kwargs)
+
+    def count_verified(self, domain: str) -> int:
+        return self._store._count_verified_decisions_impl(
+            domain, transaction=self._transaction
+        )
 
 
 class AGEGraphStore:
@@ -97,8 +116,18 @@ class AGEGraphStore:
     def __init__(
         self, dsn: str, graph_name: str = "soc_graph", *,
         cross_domain_authorizer: Callable[[CrossDomainQueryRequest], bool] | None = None,
+        use_pool: bool | None = None,
     ) -> None:
-        self._client = AGEClient(dsn=dsn, graph_name=graph_name)
+        client_kwargs: dict[str, Any] = {"dsn": dsn, "graph_name": graph_name}
+        if use_pool is not None:
+            client_kwargs["use_pool"] = use_pool
+        self._client = AGEClient(**client_kwargs)
+        if use_pool is True:
+            # Production composition constructs the store during application
+            # startup. Open and validate the pool here so the first request
+            # never pays initialization cost and unavailable pooling fails
+            # startup explicitly.
+            self._client._sync_connect()
         # Installed by trusted application wiring, never by submitted query data.
         # No policy means no cross-domain access, in every runtime profile.
         self._cross_domain_authorizer = cross_domain_authorizer
@@ -200,6 +229,8 @@ class AGEGraphStore:
         )
 
     def save_evolution(self, domain: str, variant_id: str, state: Dict[str, Any]) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._save_platform_state("EvolutionState", domain, variant_id, state)
 
     def get_evolution(self, domain: str, variant_id: str) -> Dict[str, Any] | None:
@@ -209,15 +240,21 @@ class AGEGraphStore:
         return self._list_platform_state("EvolutionState", domain)
 
     def delete_evolution(self, domain: str, variant_id: str) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._delete_platform_state("EvolutionState", domain, variant_id)
 
     def save_evolution_state(self, domain: str, variant_id: str, state: Dict[str, Any]) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self.save_evolution(domain, variant_id, state)
 
     def get_evolution_state(self, domain: str, variant_id: str) -> Dict[str, Any] | None:
         return self.get_evolution(domain, variant_id)
 
     def save_posterior(self, domain: str, key: str, state: Dict[str, Any]) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._save_platform_state("PosteriorState", domain, key, state)
 
     def get_posterior(self, domain: str, key: str) -> Dict[str, Any] | None:
@@ -227,9 +264,13 @@ class AGEGraphStore:
         return self._list_platform_state("PosteriorState", domain)
 
     def delete_posterior(self, domain: str, key: str) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._delete_platform_state("PosteriorState", domain, key)
 
     def save_promotion(self, domain: str, rule_id: str, state: Dict[str, Any]) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._save_platform_state("PromotionState", domain, rule_id, state)
 
     def get_promotion(self, domain: str, rule_id: str) -> Dict[str, Any] | None:
@@ -239,9 +280,13 @@ class AGEGraphStore:
         return self._list_platform_state("PromotionState", domain)
 
     def delete_promotion(self, domain: str, rule_id: str) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._delete_platform_state("PromotionState", domain, rule_id)
 
     def save_ledger(self, domain: str, entry_id: str, state: Dict[str, Any]) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._save_platform_state("CompoundingLedger", domain, entry_id, state)
 
     def get_ledger(self, domain: str, entry_id: str) -> Dict[str, Any] | None:
@@ -251,9 +296,13 @@ class AGEGraphStore:
         return self._list_platform_state("CompoundingLedger", domain)
 
     def delete_ledger(self, domain: str, entry_id: str) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._delete_platform_state("CompoundingLedger", domain, entry_id)
 
     def save_governance(self, domain: str, key: str, state: Dict[str, Any]) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._save_platform_state("GovernanceState", domain, key, state)
 
     def get_governance(self, domain: str, key: str) -> Dict[str, Any] | None:
@@ -263,6 +312,8 @@ class AGEGraphStore:
         return self._list_platform_state("GovernanceState", domain)
 
     def delete_governance(self, domain: str, key: str) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._delete_platform_state("GovernanceState", domain, key)
 
     def _l5_props_literal(self, properties: Mapping[str, Any]) -> str:
@@ -771,6 +822,14 @@ class AGEGraphStore:
         if not isinstance(domain, str) or not _SAFE_DOMAIN_RE.fullmatch(domain):
             value = str(domain)
             raise ValueError(f"unsupported graph domain: {value}")
+        return str(domain)
+
+    @staticmethod
+    def _validated_write_domain(domain: str) -> str:
+        AGEGraphStore._validated_domain(domain)
+        if domain.startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
+        # Preserve the tagged str subclass through transaction-layer revalidation.
         return domain
 
     def _domain_clause(self, domain: str) -> str:
@@ -789,7 +848,9 @@ class AGEGraphStore:
     ) -> str:
         # Reject malformed scope before opening a connection or creating the
         # transaction coroutine.
-        domain = self._validated_domain(domain)
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
+        domain = self._validated_write_domain(domain)
         if metadata is not None and "domain" in metadata and metadata["domain"] != domain:
             raise ValueError("decision metadata domain conflicts with calling domain")
         result = self._run(
@@ -820,11 +881,18 @@ class AGEGraphStore:
         *,
         transaction: AGETransaction,
     ) -> str:
-        domain = self._validated_domain(domain)
+        domain = self._validated_write_domain(domain)
         metadata_dict = dict(metadata or {})
         if "domain" in metadata_dict and metadata_dict["domain"] != domain:
             raise ValueError("decision metadata domain conflicts with calling domain")
         decision_id = str(metadata_dict.get("decision_id") or f"DEC-{uuid.uuid4().hex[:8]}")
+        tracked = bounded.begin(self, transaction, domain)
+        if tracked:
+            existing = transaction.run_bounded_cypher(
+                f"MATCH (d:Decision) WHERE d.domain = {self._S(domain)} AND d.decision_id = {self._S(decision_id)} RETURN d LIMIT 1"
+            )
+            if existing:
+                raise ValueError(f"duplicate decision_id in domain: {decision_id}")
         confidence_value = float(confidence)
         entity_id = str(metadata_dict.get("entity_id") or "")
         factors_json = json.dumps(factors or {}, sort_keys=True)
@@ -876,6 +944,8 @@ class AGEGraphStore:
                 factor_values=factor_values,
                 transaction=transaction,
             )
+        if tracked:
+            bounded.emit(self, transaction, domain, decision_id)
         return decision_id
 
     @staticmethod
@@ -1022,7 +1092,9 @@ class AGEGraphStore:
         factor_schema_version: str = "",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        domain = self._validated_domain(domain)
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
+        domain = self._validated_write_domain(domain)
         metadata_dict = dict(metadata or {})
         if "domain" in metadata_dict and metadata_dict["domain"] != domain:
             raise ValueError("decision metadata domain conflicts with calling domain")
@@ -1053,21 +1125,6 @@ class AGEGraphStore:
             factor_schema_version=factor_schema_version,
             metadata=metadata_dict,
         )
-        existing_rows = self._run_query(
-            f"""
-            MATCH (d:Decision {{decision_id: {self._S(str(decision_id))}}})
-            WHERE d.domain = {self._S(str(domain))}
-            RETURN d
-            """
-        )
-        if existing_rows:
-            if len(existing_rows) > 1:
-                raise ValueError(f"duplicate governed decision_id in domain: {decision_id}")
-            existing_payload = self._governed_decision_payload_from_node(existing_rows[0]["d"])
-            if existing_payload == expected_payload:
-                return
-            raise ValueError(f"conflicting governed decision_id in domain: {decision_id}")
-
         created_at = metadata_dict.get("created_at")
         if created_at is None:
             created_at = datetime.now(timezone.utc).timestamp()
@@ -1079,7 +1136,7 @@ class AGEGraphStore:
             f"category_index: {int(category_index)}, "
             f"recommended_action: {self._S(str(recommended_action))}, "
             f"recommended_index: {int(recommended_index)}, "
-            f"confidence: {float(confidence)}, "
+            f"confidence: {self._S(float(confidence) if math.isfinite(float(confidence)) else str(float(confidence)))}, "
             f"probabilities: {self._S(json.dumps(metadata_dict['probabilities'], sort_keys=True))}, "
             f"factor_vector: {self._S(json.dumps(metadata_dict['factor_vector'], sort_keys=True))}, "
             f"factor_names: {self._S(json.dumps(metadata_dict['factor_names'], sort_keys=True))}, "
@@ -1087,12 +1144,93 @@ class AGEGraphStore:
             f"scorer_version: {self._S(str(scorer_version))}, "
             f"preset_version: {self._S(str(preset_version))}, "
             f"factor_schema_version: {self._S(str(factor_schema_version))}, "
-            f"metadata: {self._S(json.dumps(metadata_dict, sort_keys=True))}, "
+            f"metadata: {self._S(json.dumps(expected_payload['metadata'], sort_keys=True))}, "
             "status: 'pending', "
             f"created_at: {float(created_at)}"
             "}"
         )
-        self._run_query(f"CREATE (d:Decision {props}) RETURN d")
+        graph_name = str(getattr(self._client, "_graph", "") or "")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", graph_name):
+            raise ValueError(f"unsafe AGE graph name: {graph_name!r}")
+        lock_key = f"{domain}:{decision_id}".replace("'", "''")
+        cypher_tag = f"$cypher_{uuid.uuid4().hex}$"
+        block_tag = f"$governed_{uuid.uuid4().hex}$"
+        identity_predicates = [
+            f"d.domain = {self._S(str(domain))}",
+            f"d.category = {self._S(str(category))}",
+            f"d.category_index = {int(category_index)}",
+            f"d.recommended_action = {self._S(str(recommended_action))}",
+            f"d.recommended_index = {int(recommended_index)}",
+            f"d.confidence = {self._S(float(confidence) if math.isfinite(float(confidence)) else str(float(confidence)))}",
+            f"d.probabilities = {self._S(json.dumps(metadata_dict['probabilities'], sort_keys=True))}",
+            f"d.factor_vector = {self._S(json.dumps(metadata_dict['factor_vector'], sort_keys=True))}",
+            f"d.factor_names = {self._S(json.dumps(metadata_dict['factor_names'], sort_keys=True))}",
+            f"d.source = {self._S(str(source))}",
+            f"d.scorer_version = {self._S(str(scorer_version))}",
+            f"d.preset_version = {self._S(str(preset_version))}",
+            f"d.factor_schema_version = {self._S(str(factor_schema_version))}",
+            f"d.metadata = {self._S(json.dumps(expected_payload['metadata'], sort_keys=True))}",
+            "d.status = 'pending'",
+        ]
+        identity_where = " AND ".join(identity_predicates)
+        statement = f"""
+        DO {block_tag}
+        DECLARE
+            existing_count bigint := 0;
+            matching_count bigint := 0;
+        BEGIN
+            PERFORM pg_advisory_xact_lock(hashtextextended('{lock_key}', 0));
+            SELECT (cnt::text)::bigint INTO existing_count
+            FROM cypher('{graph_name}', {cypher_tag}
+                MATCH (d:Decision {{decision_id: {self._S(str(decision_id))}}})
+                WHERE d.domain = {self._S(str(domain))}
+                RETURN count(d) AS cnt
+            {cypher_tag}) AS (cnt agtype);
+
+            IF existing_count > 1 THEN
+                RAISE EXCEPTION 'duplicate governed decision';
+            ELSIF existing_count = 1 THEN
+                SELECT (cnt::text)::bigint INTO matching_count
+                FROM cypher('{graph_name}', {cypher_tag}
+                    MATCH (d:Decision {{decision_id: {self._S(str(decision_id))}}})
+                    WHERE {identity_where}
+                    RETURN count(d) AS cnt
+                {cypher_tag}) AS (cnt agtype);
+                IF matching_count <> 1 THEN
+                    RAISE EXCEPTION 'conflicting governed decision';
+                END IF;
+            ELSE
+                PERFORM d
+                FROM cypher('{graph_name}', {cypher_tag}
+                    CREATE (d:Decision {props}) RETURN d
+                {cypher_tag}) AS (d agtype);
+            END IF;
+        END
+        {block_tag};
+        """
+
+        def persist(transaction: AGETransaction) -> None:
+            tracked = bounded.begin(self, transaction, domain)
+            existing = transaction.run_bounded_cypher(
+                f"MATCH (d:Decision) WHERE d.domain = {self._S(domain)} AND d.decision_id = {self._S(decision_id)} RETURN d LIMIT 1"
+            ) if tracked else []
+            transaction.execute_sql(statement)
+            if tracked and not existing:
+                bounded.emit(self, transaction, domain, decision_id)
+
+        try:
+            self._run(self._client.run_transaction(persist))
+        except Exception as exc:
+            message = str(exc).lower()
+            if "duplicate governed decision" in message:
+                raise ValueError(
+                    f"duplicate governed decision_id in domain: {decision_id}"
+                ) from exc
+            if "conflicting governed decision" in message:
+                raise ValueError(
+                    f"conflicting governed decision_id in domain: {decision_id}"
+                ) from exc
+            raise
 
     def _governed_decision_payload(
         self,
@@ -1178,7 +1316,7 @@ class AGEGraphStore:
             f"entity_id: {self._S(entity_id)}, "
             f"category: {self._S(category)}, "
             f"recommended_action: {self._S(action)}, "
-            f"confidence: {confidence}, "
+            f"confidence: {self._S(confidence if math.isfinite(confidence) else str(confidence))}, "
             f"factors: {self._S(factors_json)}, "
             f"metadata: {self._S(metadata_json)}, "
             f"created_at: {created_at}, "
@@ -1204,6 +1342,8 @@ class AGEGraphStore:
         recommended_action: Optional[str] = None,
         was_override: Optional[bool] = None,
     ) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._write_outcome_impl(
             decision_id=decision_id,
             actual_action=actual_action,
@@ -1236,6 +1376,8 @@ class AGEGraphStore:
         caused_by_decision_id: str | None = None,
     ) -> None:
         """Persist the verified outcome and resulting centroid atomically."""
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._run(
             self._client.run_transaction(
                 lambda transaction: self._write_outcome_and_update_centroid_impl(
@@ -1306,6 +1448,18 @@ class AGEGraphStore:
         was_override: Optional[bool] = None,
         transaction: AGETransaction | None = None,
     ) -> None:
+        if transaction is None:
+            self._run(self._client.run_transaction(lambda tx: self._write_outcome_impl(
+                decision_id=decision_id, actual_action=actual_action, is_correct=is_correct,
+                metadata=metadata, domain=domain, outcome=outcome,
+                verified_at_epoch=verified_at_epoch, quality_signal=quality_signal,
+                override_comment=override_comment, verified_by=verified_by,
+                analyst_action=analyst_action, final_action=final_action,
+                recommended_action=recommended_action, was_override=was_override,
+                transaction=tx,
+            )))
+            return
+        tracked = bounded.begin(self, transaction, self._validated_domain(domain))
         metadata_dict = dict(metadata or {})
         actual_index = int(metadata_dict.get("actual_index", 0))
         reward = float(metadata_dict.get("reward", 0.0))
@@ -1380,6 +1534,8 @@ class AGEGraphStore:
             run_query = lambda cypher: tx.run_cypher(cypher)
         rows = run_query(query)
         if rows:
+            if tracked:
+                bounded.emit(self, transaction, domain, decision_id)
             return
         self._raise_write_outcome_no_row(
             decision_id,
@@ -1500,6 +1656,8 @@ class AGEGraphStore:
         factor_names: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         metadata_dict = dict(metadata or {})
         created_at = float(metadata_dict.get("created_at", datetime.now(timezone.utc).timestamp()))
         vector = [float(value) for value in factor_vector] if factor_vector is not None else []
@@ -1676,6 +1834,8 @@ class AGEGraphStore:
         status: str,
         policy_version: str,
     ) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         payload = {
             "status_id": str(status_id),
             "snapshot_id": str(status_id),
@@ -1770,6 +1930,8 @@ class AGEGraphStore:
         window: int,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         payload = {
             "fingerprint_id": str(fingerprint_id),
             "domain": str(domain),
@@ -1864,6 +2026,8 @@ class AGEGraphStore:
         metadata: Optional[Dict[str, Any]] = None,
         decision_id: Optional[str] = None,
     ) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._write_centroid_checkpoint_impl(
             checkpoint_id=checkpoint_id,
             domain=domain,
@@ -2185,6 +2349,8 @@ class AGEGraphStore:
         source_route: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> tuple[int, str]:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         receipt_intent_id = str(receipt_intent_id)
         domain = str(domain)
         decision_id = str(decision_id)
@@ -2368,6 +2534,8 @@ class AGEGraphStore:
         metadata: Optional[Dict[str, Any]] = None,
         decision_id: Optional[str] = None,
     ) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         payload = {
             "event_id": str(event_id),
             "domain": str(domain),
@@ -2465,6 +2633,10 @@ class AGEGraphStore:
         evolution_event_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
+        if str(source_domain).startswith("jmns__") and not is_internal_namespace(source_domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
+        if str(target_domain).startswith("jmns__") and not is_internal_namespace(target_domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         payload = {
             "pattern_id": str(pattern_id),
             "source_domain": str(source_domain),
@@ -2702,6 +2874,8 @@ class AGEGraphStore:
         entity_type: str,
         domain: str,
     ) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         decision_rows = self._run_query(
             f"""
             MATCH (d:Decision {{decision_id: {self._S(str(decision_id))}}})
@@ -2820,9 +2994,16 @@ class AGEGraphStore:
         return self._node_to_dict(rows[0].get("d", rows[0]))
 
     def get_decisions(
-        self, domain: str, category: Optional[str] = None, limit: int = 400
+        self,
+        domain: str,
+        category: Optional[str] = None,
+        limit: int = 400,
+        *,
+        offset: int = 0,
+        chronological: bool = False,
     ) -> List[Dict[str, Any]]:
         limit_value = self._safe_limit(limit)
+        offset_value = max(int(offset), 0)
         clauses = [
             f"d.domain = {self._S(domain)}",
             "(d.archived IS NULL OR d.archived <> true)",
@@ -2835,14 +3016,41 @@ class AGEGraphStore:
             MATCH (d:Decision)
             {where_clause}
             RETURN d
-            ORDER BY d.created_at, d.decision_id
+            ORDER BY d.created_at {'ASC' if chronological else 'DESC'}, d.decision_id ASC
+            SKIP {offset_value}
             LIMIT {limit_value}
             """
         )
         return [self._node_to_dict(row.get("d", row)) for row in rows]
 
-    def get_verified_decisions(self, domain: str) -> List[Dict[str, Any]]:
+    def get_verified_decisions(
+        self,
+        domain: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+        chronological: bool = False,
+        verified_after: tuple[float, str] | None = None,
+    ) -> List[Dict[str, Any]]:
         domain_clause = self._domain_clause(domain)
+        # A verification cursor takes precedence over offset; never combine it with SKIP.
+        pagination = (
+            "" if verified_after is not None else f"SKIP {max(int(offset), 0)}"
+        )
+        if limit is not None:
+            pagination += f"\n            LIMIT {self._safe_limit(limit)}"
+        cursor_clause = ""
+        if verified_after is not None:
+            verified_at, verified_id = verified_after
+            cursor_clause = (
+                "WHERE (_verified_at > "
+                f"{self._S(float(verified_at))} OR "
+                f"(_verified_at = {self._S(float(verified_at))} "
+                f"AND d.decision_id > {self._S(str(verified_id))}))"
+            )
+        # Cursor reads follow the predicate's coalesced verification timestamp.
+        # Legacy offset reads retain their creation-time ordering.
+        order_key = "_verified_at" if verified_after is not None else "_created_at"
         rows = self._run_query(
             f"""
             MATCH (d:Decision)
@@ -2850,9 +3058,13 @@ class AGEGraphStore:
               AND (d.archived IS NULL OR d.archived <> true)
               AND d.status IN ['confirmed', 'overridden']
             OPTIONAL MATCH (d)-[:HAS_OUTCOME]->(o:Outcome)
+            WITH d, o, coalesce(o.verified_at, d.created_at) AS _verified_at
+            {cursor_clause}
             RETURN DISTINCT properties(d) AS d, properties(o) AS o,
-                d.created_at AS _created_at, d.decision_id AS _decision_id
-            ORDER BY _created_at, _decision_id
+                d.created_at AS _created_at, d.decision_id AS _decision_id,
+                _verified_at AS _verified_at
+            ORDER BY {order_key} ASC, _decision_id ASC
+            {pagination}
             """
         )
         return [self._merge_decision_outcome(row) for row in rows]
@@ -2863,15 +3075,26 @@ class AGEGraphStore:
         return self.count_verified_decisions(domain)
 
     def count_verified_decisions(self, domain: str) -> int:
+        return self._count_verified_decisions_impl(domain)
+
+    def _count_verified_decisions_impl(
+        self,
+        domain: str,
+        *,
+        transaction: AGETransaction | None = None,
+    ) -> int:
         domain_clause = self._domain_clause(domain)
-        rows = self._run_query(
-            f"""
+        query = f"""
             MATCH (d:Decision)
             WHERE {domain_clause}
               AND (d.archived IS NULL OR d.archived <> true)
               AND d.status IN ['confirmed', 'overridden']
             RETURN count(DISTINCT d.decision_id) AS cnt
             """
+        rows = (
+            self._run_query(query)
+            if transaction is None
+            else transaction.run_cypher(query)
         )
         return self._int_from_rows(rows, "cnt")
 
@@ -2925,6 +3148,8 @@ class AGEGraphStore:
         delta_norm: float,
         caused_by_decision_id: str | None = None,
     ) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         self._update_centroid_impl(
             domain=domain,
             category=category,
@@ -3046,6 +3271,8 @@ class AGEGraphStore:
         n_overridden: int | None = None,
         entity_group: str | None = None,
     ) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         domain_value = str(domain)
         tensor = self._normalize_dk_weight_tensor(weight_tensor)
         decisions_used = self._normalize_n_decisions_used(n_decisions_used)
@@ -3176,6 +3403,8 @@ class AGEGraphStore:
         caused_by_decision_id: str | None = None,
         old_status: str | None = None,
     ) -> str:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         state = self._normalize_conservation_state_values(
             domain=domain,
             status=status,
@@ -3348,6 +3577,8 @@ class AGEGraphStore:
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         decision_id = str(kwargs.get("decision_id") or (metadata or {}).get("decision_id") or "")
         if hasattr(centroids, "tolist"):
             centroids = centroids.tolist()
@@ -3421,6 +3652,8 @@ class AGEGraphStore:
         variant_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         metadata_json = json.dumps(metadata or {}, sort_keys=True)
         timestamp = datetime.now(timezone.utc).isoformat()
         props = (
@@ -3443,6 +3676,8 @@ class AGEGraphStore:
         *,
         domain: str,
     ) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         domain_value = str(domain).strip()
         if not domain_value:
             raise ValueError("link_decision_to_entity requires a non-empty domain")
@@ -3655,6 +3890,8 @@ class AGEGraphStore:
 
     def prune_evolution_events(self, domain: str, keep_recent: int = 10_000) -> int:
         """Delete old proof_record events while preserving non-proof evolution state first."""
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         domain_value = str(domain)
         keep_recent = max(int(keep_recent), 0)
         event_table = self._age_relation("EvolutionEvent")
@@ -3743,63 +3980,74 @@ class AGEGraphStore:
 
     def archive_old_decisions(self, domain: str, keep_recent: int = 800) -> int:
         """Archive all but the newest active Decisions for one domain."""
-        domain = str(domain)
-        keep_recent = max(int(keep_recent), 0)
-        domain_clause = self._domain_clause(domain)
-        active_rows = self._run_query(
-            f"""
-            MATCH (d:Decision)
-            WHERE {domain_clause}
-              AND (d.archived IS NULL OR d.archived = false)
-            RETURN count(d) AS cnt
-            """
-        )
-        active_count = self._int_from_rows(active_rows, "cnt")
-        if active_count <= keep_recent:
-            return 0
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
+        domain = self._validated_domain(domain)
 
-        candidate_rows = self._run_query(
-            f"""
-            MATCH (d:Decision)
-            WHERE {domain_clause}
-              AND (d.archived IS NULL OR d.archived = false)
-            RETURN d.decision_id AS decision_id
-            ORDER BY d.created_at DESC, d.decision_id DESC
-            """
-        )
-        ordered_ids = [
-            str(row["decision_id"])
-            for row in candidate_rows
-            if row.get("decision_id") is not None
-        ]
-        candidate_ids = sorted(set(ordered_ids[keep_recent:]))
-        if not candidate_ids:
-            return 0
-
-        archived_at = datetime.now(timezone.utc)
-        archived_epoch = archived_at.timestamp()
-        archived_at_str = archived_at.isoformat()
-        archived_total = 0
-        for start in range(0, len(candidate_ids), 100):
-            batch = candidate_ids[start : start + 100]
-            id_list = "[" + ", ".join(self._S(value) for value in batch) + "]"
-            rows = self._run_query(
+        def operation(tx: AGETransaction) -> int:
+            tracked = bounded.begin(self, tx, domain)
+            keep = max(int(keep_recent), 0)
+            domain_clause = self._domain_clause(domain)
+            active_rows = tx.run_cypher(
                 f"""
                 MATCH (d:Decision)
                 WHERE {domain_clause}
                   AND (d.archived IS NULL OR d.archived = false)
-                  AND d.decision_id IN {id_list}
-                SET d.archived = true,
-                    d.archived_at = {float(archived_epoch)},
-                    d.archived_at_str = {self._S(archived_at_str)},
-                    d.archive_reason = 'retention_window',
-                    d.archive_status = 'archived',
-                    d.archived_from_status = d.status
                 RETURN count(d) AS cnt
                 """
             )
-            archived_total += self._int_from_rows(rows, "cnt")
-        return archived_total
+            active_count = self._int_from_rows(active_rows, "cnt")
+            if active_count <= keep:
+                return 0
+
+            candidate_rows = tx.run_cypher(
+                f"""
+                MATCH (d:Decision)
+                WHERE {domain_clause}
+                  AND (d.archived IS NULL OR d.archived = false)
+                RETURN d.decision_id AS decision_id
+                ORDER BY d.created_at DESC, d.decision_id DESC
+                """,
+                preserve_strings=True,
+            )
+            ordered_ids = [
+                str(row["decision_id"])
+                for row in candidate_rows
+                if row.get("decision_id") is not None
+            ]
+            candidate_ids = sorted(set(ordered_ids[keep:]))
+            if not candidate_ids:
+                return 0
+
+            archived_at = datetime.now(timezone.utc)
+            archived_epoch = archived_at.timestamp()
+            archived_at_str = archived_at.isoformat()
+            archived_total = 0
+            for start in range(0, len(candidate_ids), 100):
+                batch = candidate_ids[start : start + 100]
+                id_list = "[" + ", ".join(self._S(value) for value in batch) + "]"
+                rows = tx.run_cypher(
+                    f"""
+                    MATCH (d:Decision)
+                    WHERE {domain_clause}
+                      AND (d.archived IS NULL OR d.archived = false)
+                      AND d.decision_id IN {id_list}
+                    SET d.archived = true,
+                        d.archived_at = {float(archived_epoch)},
+                        d.archived_at_str = {self._S(archived_at_str)},
+                        d.archive_reason = 'retention_window',
+                        d.archive_status = 'archived',
+                        d.archived_from_status = d.status
+                    RETURN count(d) AS cnt
+                    """
+                )
+                if tracked:
+                    for decision_id in batch:
+                        bounded.emit(self, tx, domain, decision_id, deleted=True)
+                archived_total += self._int_from_rows(rows, "cnt")
+            return archived_total
+
+        return int(self._run(self._client.run_transaction(operation)))
 
     def count_archived(self, domain: str) -> int:
         rows = self._run_query(
@@ -3819,61 +4067,77 @@ class AGEGraphStore:
         status_filter: str = "pending",
         confirm_verified: bool = False,
     ) -> int:
-        domain = str(domain)
-        status_filter = str(status_filter)
-        if status_filter not in {"pending", "confirmed", "overridden"}:
-            raise ValueError(f"unsupported archive status_filter: {status_filter}")
-        if status_filter in {"confirmed", "overridden"} and not confirm_verified:
-            raise ValueError("Archiving verified decisions reduces active V; pass confirm_verified=True")
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
+        domain = self._validated_domain(domain)
 
-        cutoff = float(before)
-        candidate_rows = self._run_query(
-            f"""
-            MATCH (d:Decision)
-            WHERE d.domain = {self._S(domain)}
-              AND d.status = {self._S(status_filter)}
-              AND (d.archived IS NULL OR d.archived = false)
-            RETURN d
-            """
-        )
-        decision_ids: List[str] = []
-        for row in candidate_rows:
-            decision = self._node_to_dict(row.get("d", row))
-            created_at = decision.get("created_at")
-            if isinstance(created_at, bool):
-                continue
-            if not isinstance(created_at, (int, float)):
-                continue
-            if float(created_at) < cutoff and decision.get("decision_id"):
-                decision_ids.append(str(decision["decision_id"]))
+        def operation(tx: AGETransaction) -> int:
+            tracked = bounded.begin(self, tx, domain)
+            status = str(status_filter)
+            if status not in {"pending", "confirmed", "overridden"}:
+                raise ValueError(f"unsupported archive status_filter: {status}")
+            if status in {"confirmed", "overridden"} and not confirm_verified:
+                raise ValueError("Archiving verified decisions reduces active V; pass confirm_verified=True")
 
-        if not decision_ids:
-            return 0
+            cutoff = float(before)
+            candidate_rows = tx.run_cypher(
+                f"""
+                MATCH (d:Decision)
+                WHERE d.domain = {self._S(domain)}
+                  AND d.status = {self._S(status)}
+                  AND (d.archived IS NULL OR d.archived = false)
+                RETURN d
+                """
+            )
+            decision_ids: List[str] = []
+            for row in candidate_rows:
+                decision = self._node_to_dict(row.get("d", row))
+                created_at = decision.get("created_at")
+                if isinstance(created_at, bool):
+                    continue
+                if not isinstance(created_at, (int, float)):
+                    continue
+                if float(created_at) < cutoff and decision.get("decision_id"):
+                    decision_ids.append(str(decision["decision_id"]))
 
-        id_list = "[" + ", ".join(self._S(value) for value in sorted(set(decision_ids))) + "]"
-        archived_at = datetime.now(timezone.utc).timestamp()
-        rows = self._run_query(
-            f"""
-            MATCH (d:Decision)
-            WHERE d.domain = {self._S(domain)}
-              AND d.status = {self._S(status_filter)}
-              AND (d.archived IS NULL OR d.archived = false)
-              AND d.decision_id IN {id_list}
-            SET d.archived = true,
-                d.archived_at = {float(archived_at)},
-                d.archive_reason = {self._S(f"protocol_v2_archive:{status_filter}")},
-                d.archive_status = 'archived',
-                d.archived_from_status = d.status
-            RETURN count(d) AS cnt
-            """
-        )
-        return self._int_from_rows(rows, "cnt")
+            if not decision_ids:
+                return 0
+
+            id_list = "[" + ", ".join(self._S(value) for value in sorted(set(decision_ids))) + "]"
+            archived_at = datetime.now(timezone.utc).timestamp()
+            rows = tx.run_cypher(
+                f"""
+                MATCH (d:Decision)
+                WHERE d.domain = {self._S(domain)}
+                  AND d.status = {self._S(status)}
+                  AND (d.archived IS NULL OR d.archived = false)
+                  AND d.decision_id IN {id_list}
+                SET d.archived = true,
+                    d.archived_at = {float(archived_at)},
+                    d.archive_reason = {self._S(f"protocol_v2_archive:{status}")},
+                    d.archive_status = 'archived',
+                    d.archived_from_status = d.status
+                RETURN count(d) AS cnt
+                """
+            )
+            if tracked:
+                for decision_id in sorted(set(decision_ids)):
+                    bounded.emit(self, tx, domain, decision_id, deleted=True)
+            return self._int_from_rows(rows, "cnt")
+
+        return int(self._run(self._client.run_transaction(operation)))
 
     def domain_scoped_reset(self, domain: str) -> None:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         domain = str(domain)
         self._validate_protocol_v2_reset_scope(domain)
 
         def reset(tx) -> None:
+            if bounded.begin(self, tx, self._validated_domain(domain)):
+                active = tx.run_bounded_cypher(f"MATCH (d:Decision) WHERE d.domain = {self._S(domain)} AND (d.archived IS NULL OR d.archived = false) RETURN d.decision_id AS decision_id")
+                for row in active:
+                    bounded.emit(self, tx, domain, str(row["decision_id"]), deleted=True)
             self._reset_domain_relationships(tx, domain)
             self._delete_domain_label(tx, "EvidenceReceipt", domain)
             self._delete_domain_label(tx, "Outcome", domain)
@@ -4279,6 +4543,8 @@ class AGEGraphStore:
         dry_run: bool = False,
         idempotency_key: str | None = None,
     ) -> Any:
+        if str(domain).startswith("jmns__") and not is_internal_namespace(domain):
+            raise ValueError("domain prefix 'jmns__' is reserved for namespace routing")
         from copilot_sdk.graph.enrichment import (
             EntityEnrichmentReceipt,
             is_protected_metric_name,

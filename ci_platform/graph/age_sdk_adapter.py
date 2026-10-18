@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable, cast
+
+if TYPE_CHECKING:
+    from copilot_sdk.graph.query import (
+        DecisionAggregate, DecisionChangePage, DecisionFilter, DecisionGroup,
+        DecisionMetric, DecisionPageRequest, DecisionPageResult, DecisionProjection,
+    )
 
 from ci_platform.graph.age_graph_store import AGEGraphStore
 
@@ -17,11 +23,16 @@ class AGEGraphStoreAdapter:
         graph_name: str = "soc_graph",
         store: AGEGraphStore | None = None,
         domain: str = "graph",
+        use_pool: bool | None = None,
     ) -> None:
         if store is None:
             if dsn is None:
                 raise ValueError("dsn is required when store is not provided")
-            store = AGEGraphStore(dsn=dsn, graph_name=graph_name)
+            store = AGEGraphStore(
+                dsn=dsn,
+                graph_name=graph_name,
+                use_pool=use_pool,
+            )
         self._store = store
         self.domain = str(domain)
 
@@ -336,11 +347,31 @@ class AGEGraphStoreAdapter:
         domain: str,
         category: str | None = None,
         limit: int = 400,
+        *,
+        offset: int = 0,
+        chronological: bool = False,
     ) -> list[dict[str, Any]]:
-        return self._store.get_decisions(domain=domain, category=category, limit=limit)
+        return self._store.get_decisions(
+            domain=domain, category=category, limit=limit, offset=offset,
+            chronological=chronological,
+        )
 
-    def get_verified_decisions(self, domain: str) -> list[dict[str, Any]]:
-        return self._store.get_verified_decisions(domain)
+    def get_verified_decisions(
+        self,
+        domain: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+        chronological: bool = False,
+        verified_after: tuple[float, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._store.get_verified_decisions(
+            domain,
+            offset=offset,
+            limit=limit,
+            chronological=chronological,
+            verified_after=verified_after,
+        )
 
     def get_all_decisions(self, domain: str) -> list[dict[str, Any]]:
         return self._store.get_all_decisions(domain)
@@ -797,3 +828,75 @@ class AGEGraphStoreAdapter:
 
     def close(self) -> None:
         self._store.close()
+
+
+class BoundedAGEGraphStoreAdapter(AGEGraphStoreAdapter):
+    """Opt-in bounded capability; construction requires same-graph activation."""
+
+    def __init__(self, dsn: str | None = None, graph_name: str = "soc_graph",
+                 store: AGEGraphStore | None = None, domain: str = "graph",
+                 use_pool: bool | None = None) -> None:
+        super().__init__(dsn, graph_name, store, domain, use_pool)
+        try:
+            self._bounded_read(domain, "ready")
+        except Exception:
+            if store is None:
+                self._store.close()
+            raise
+
+    def _bounded_read(self, domain: str, kind: str, **options: Any) -> Any:
+        from ci_platform.graph import bounded_projection as bp
+        from ci_platform.graph.bounded_projection_migration import read
+        from copilot_sdk.graph.query import DecisionGenerationChanged, ProjectionCardinalityExceeded
+
+        try:
+            return read(self._store, domain, kind, **options)
+        except bp.GenerationChanged as exc:
+            raise DecisionGenerationChanged(exc.expected, exc.actual) from exc
+        except bp.CardinalityExceeded as exc:
+            raise ProjectionCardinalityExceeded(exc.count, exc.limit) from exc
+
+    @staticmethod
+    def _filters(filters: DecisionFilter | None) -> dict[str, Any]:
+        from dataclasses import asdict
+        return asdict(filters) if filters is not None else {}
+
+    def query_decisions(
+        self, domain: str, *, filters: DecisionFilter | None = None,
+        projection: DecisionProjection = "summary", page: DecisionPageRequest | None = None,
+        as_of_generation: int | None = None,
+    ) -> DecisionPageResult:
+        from copilot_sdk.graph.query import DecisionCursor, DecisionPageRequest, DecisionPageResult
+        page = page or DecisionPageRequest()
+        if page.after is not None and page.after.order_by != page.order_by:
+            raise ValueError("cursor order does not match page order")
+        items, after, more = self._bounded_read(
+            domain, "query", filters=self._filters(filters), projection=projection,
+            order_by=page.order_by, descending=page.descending, limit=page.limit,
+            offset=page.offset, after=(page.after.value, page.after.decision_id) if page.after else None,
+            as_of_generation=as_of_generation,
+        )
+        cursor = DecisionCursor(page.order_by, after[0], after[1]) if after else None
+        return DecisionPageResult(tuple(items), cursor, more)
+
+    def count_decisions(self, domain: str, *, filters: DecisionFilter | None = None) -> int:
+        return int(self._bounded_read(domain, "count", filters=self._filters(filters)))
+
+    def aggregate_decisions(
+        self, domain: str, *, filters: DecisionFilter | None = None,
+        group_by: tuple[DecisionGroup, ...] = (), metrics: tuple[DecisionMetric, ...] = ("count",),
+    ) -> tuple[DecisionAggregate, ...]:
+        from copilot_sdk.graph.query import DecisionAggregate
+        rows = self._bounded_read(domain, "aggregate", filters=self._filters(filters), group_by=group_by, metrics=metrics)
+        return tuple(DecisionAggregate(dimensions, values) for dimensions, values in rows)
+
+    def get_decision_changes(
+        self, domain: str, *, after_generation: int, limit: int = 1000,
+        projection: DecisionProjection = "full", filters: DecisionFilter | None = None,
+    ) -> DecisionChangePage:
+        from copilot_sdk.graph.query import DecisionChangePage
+        events, next_generation, current_generation, more = self._bounded_read(
+            domain, "feed", after_generation=after_generation, limit=limit,
+            projection=projection, filters=self._filters(filters),
+        )
+        return DecisionChangePage(tuple(events), next_generation, current_generation, more)

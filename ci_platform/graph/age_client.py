@@ -13,9 +13,9 @@ Key AGE dialect differences from AGE:
   - MATCH-then-CREATE pattern required (MERGE unsupported; two-step for idempotency)
 
 Connection model:
-  - Default: sync psycopg.connect() per query, executed in asyncio.to_thread()
-  - Opt-in: pooled AGE connections when psycopg_pool is available
-  - Opt-in fallback: serialized warm connection reuse when psycopg_pool is absent
+  - Production/demo callers request a bounded psycopg connection pool
+  - Pool startup fails explicitly when psycopg_pool or PostgreSQL is unavailable
+  - Fresh per-query connections remain an explicit test/offline mode
   - All public methods are async (interface parity with GraphClient)
 
 Connection configuration is supplied explicitly by callers. Domain services
@@ -25,6 +25,7 @@ resolve DSN and graph through GraphConfig before constructing this client.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import importlib.util
 import json
 import logging
@@ -34,12 +35,20 @@ import re
 import threading
 import time
 import uuid
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, TypeVar, cast
+from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, cast
 
 import psycopg  # sync only — no AsyncConnection anywhere
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_POOL_MIN_SIZE = 2
+DEFAULT_POOL_MAX_SIZE = 8
+DEFAULT_POOL_TIMEOUT_SECONDS = 5.0
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 3
+DEFAULT_STATEMENT_TIMEOUT_MS = 8_000
+MAX_CLIENTS = 8
 
 def _with_sslmode_disabled(dsn: str) -> str:
     """Apply local-dev SSL defaults without overriding production DSNs."""
@@ -63,6 +72,38 @@ def _pool_reconnect_failed(pool: Any) -> None:
 
 _DESTRUCTIVE_SET_RE = re.compile(r'\bSET\s+(\w+)\s*=\s*\{')
 _MERGE_RE = re.compile(r'\bMERGE\s*\(', re.IGNORECASE)
+# Only these bounded result fields contain serialized JSON, never identity/text.
+_BOUNDED_JSON_FIELDS = frozenset({
+    "factor_vector", "factor_names", "factors", "probabilities",
+    "learning_metadata", "tags", "options_factors", "metadata",
+    "outcome_metadata", "payload", "journal", "context",
+})
+_BOUNDED_FLOAT_FIELDS = frozenset({"confidence", "pnl", "entry_price", "exit_price"})
+
+
+def _decode_bounded_value(field: str, value: Any) -> Any:
+    """Decode schema-designated values, preserving all other agtype strings."""
+    if isinstance(value, str):
+        if field in _BOUNDED_JSON_FIELDS:
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+        # Compatibility with canonical inf/-inf/nan strings written by P2b.
+        # These fields normalize to floats before storage, so no text collides.
+        if field in _BOUNDED_FLOAT_FIELDS and value in {"inf", "-inf", "nan"}:
+            return float(value)
+    return value
+
+
+def _cypher_syntax(cypher: str) -> str:
+    """Mask quoted literals/identifiers and comments before inspecting syntax."""
+    return re.sub(
+        r"""'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:``|[^`])*`|//[^\n]*|/\*.*?\*/""",
+        lambda match: " " * len(match.group(0)), cypher, flags=re.DOTALL,
+    )
+
+
 T = TypeVar("T")
 
 
@@ -90,8 +131,9 @@ def redact_dsn(dsn: str) -> str:
 
 def _check_safe_cypher(cypher: str) -> None:
     """Reject patterns AGE does not support: SET n = {} and MERGE (."""
-    for match in _DESTRUCTIVE_SET_RE.finditer(cypher):
-        var_fragment = cypher[match.start():match.end()]
+    syntax = _cypher_syntax(cypher)
+    for match in _DESTRUCTIVE_SET_RE.finditer(syntax):
+        var_fragment = syntax[match.start():match.end()]
         before_eq = var_fragment.split('=')[0]
         if '.' not in before_eq and '+' not in before_eq:
             raise ValueError(
@@ -99,7 +141,7 @@ def _check_safe_cypher(cypher: str) -> None:
                 f"Use 'SET n.prop = val' or 'SET n += {{props}}' instead. "
                 f"Query: {cypher[:200]}"
             )
-    if _MERGE_RE.search(cypher):
+    if _MERGE_RE.search(syntax):
         raise ValueError(
             f"Forbidden: MERGE is not supported by Apache AGE. "
             f"Use CREATE for new nodes or MATCH + SET for updates. "
@@ -128,6 +170,9 @@ class AGEClient:
         use_pool: Optional[bool] = None,
         pool_min_size: Optional[int] = None,
         pool_max_size: Optional[int] = None,
+        pool_timeout_seconds: float = DEFAULT_POOL_TIMEOUT_SECONDS,
+        connect_timeout_seconds: int = DEFAULT_CONNECT_TIMEOUT_SECONDS,
+        statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS,
     ) -> None:
         if dsn is None or not str(dsn).strip():
             raise ValueError("explicit dsn is required for AGEClient")
@@ -136,11 +181,29 @@ class AGEClient:
         self._dsn = _with_sslmode_disabled(str(dsn).strip())
         self._graph = str(graph_name).strip()
         self._pool_requested = _env_truthy("AGE_USE_POOL") if use_pool is None else bool(use_pool)
-        self._pool_min_size = pool_min_size if pool_min_size is not None else _env_int("AGE_POOL_MIN_SIZE", 3)
-        self._pool_max_size = pool_max_size if pool_max_size is not None else _env_int("AGE_POOL_MAX_SIZE", 15)
+        self._pool_min_size = pool_min_size if pool_min_size is not None else _env_int("AGE_POOL_MIN_SIZE", DEFAULT_POOL_MIN_SIZE)
+        self._pool_max_size = pool_max_size if pool_max_size is not None else _env_int("AGE_POOL_MAX_SIZE", DEFAULT_POOL_MAX_SIZE)
+        self._pool_timeout_seconds = float(pool_timeout_seconds)
+        self._connect_timeout_seconds = int(connect_timeout_seconds)
+        self._statement_timeout_ms = int(statement_timeout_ms)
+        if self._pool_min_size < 1 or self._pool_max_size < self._pool_min_size:
+            raise ValueError("AGE pool sizes must satisfy 1 <= min_size <= max_size")
+        if self._pool_timeout_seconds <= 0:
+            raise ValueError("pool_timeout_seconds must be positive")
+        if self._connect_timeout_seconds <= 0:
+            raise ValueError("connect_timeout_seconds must be positive")
+        if not 0 < self._statement_timeout_ms < 10_000:
+            raise ValueError("statement_timeout_ms must be between 1 and 9999")
         self._pool_available = _PSYCOPG_POOL_AVAILABLE
         self._pool = None
+        # One lifecycle lock guards the closed flag and pool creation/lookup.
+        # Checkout waits remain outside this lock so pool exhaustion cannot
+        # serialize otherwise independent borrowers.
         self._pool_lock = threading.Lock()
+        self._metrics_lock = threading.Lock()
+        self._total_checkouts = 0
+        self._total_returns = 0
+        self._resets_on_return = 0
         self._warm_conn = None
         self._warm_lock = threading.RLock()
         self._closed = False
@@ -149,7 +212,7 @@ class AGEClient:
         elif self._pool_available:
             self._connection_mode = "pooled"
         else:
-            self._connection_mode = "warm_fallback"
+            self._connection_mode = "pool_unavailable"
 
     # ── interface parity (GraphClient) ────────────────────────────────────────
 
@@ -176,22 +239,119 @@ class AGEClient:
     def pool_available(self) -> bool:
         return self.connection_mode == "pooled" and bool(getattr(self, "_pool_available", False))
 
+    def connection_diagnostics(self) -> dict[str, Any]:
+        """Return bounded connection-mode and pool-saturation diagnostics."""
+        pool = getattr(self, "_pool", None)
+        raw_stats: dict[str, Any] = {}
+        if pool is not None:
+            get_stats = getattr(pool, "get_stats", None)
+            if callable(get_stats):
+                try:
+                    raw_stats = dict(get_stats())
+                except Exception:
+                    logger.debug("Unable to read AGE pool statistics", exc_info=True)
+        return {
+            "connection_mode": self.connection_mode,
+            "pool_requested": bool(self._pool_requested),
+            "pool_available": self.pool_available,
+            "pool_min_size": int(self._pool_min_size),
+            "pool_max_size": int(self._pool_max_size),
+            "pool_timeout_seconds": float(self._pool_timeout_seconds),
+            "connect_timeout_seconds": int(self._connect_timeout_seconds),
+            "statement_timeout_ms": int(self._statement_timeout_ms),
+            "pool_size": int(raw_stats.get("pool_size", 0) or 0),
+            "pool_available_connections": int(raw_stats.get("pool_available", 0) or 0),
+            "pool_requests_waiting": int(raw_stats.get("requests_waiting", 0) or 0),
+        }
+
+    def get_pool_diagnostics(self) -> dict[str, Any]:
+        """Return pool lifecycle counters and the configured client keys."""
+        diagnostics = self.connection_diagnostics()
+        with self._metrics_lock:
+            total_checkouts = self._total_checkouts
+            total_returns = self._total_returns
+            resets_on_return = self._resets_on_return
+        with _clients_lock:
+            keys = [
+                (redact_dsn(dsn), graph)
+                for dsn, graph in sorted(_clients)
+            ]
+        diagnostics.update(
+            {
+                "checked_out": max(0, total_checkouts - total_returns),
+                "idle": diagnostics["pool_available_connections"],
+                "total_checkouts": total_checkouts,
+                "total_returns": total_returns,
+                "resets_on_return": resets_on_return,
+                "dsn_graph_keys": keys,
+            }
+        )
+        return diagnostics
+
     def redacted_dsn(self) -> str:
         return redact_dsn(getattr(self, "_dsn", ""))
 
     def _configure_age_session(self, conn: psycopg.Connection) -> None:
         conn.execute("LOAD 'age'")
-        conn.execute("SET search_path = ag_catalog, '$user', public; SET statement_timeout = '120s'")
+        self._set_age_session_defaults(conn)
+
+    def _set_age_session_defaults(self, conn: psycopg.Connection) -> None:
+        conn.execute(
+            "SET search_path = ag_catalog, '$user', public; "
+            f"SET statement_timeout = '{getattr(self, '_statement_timeout_ms', DEFAULT_STATEMENT_TIMEOUT_MS)}ms'"
+        )
+
+    def _reset_age_session(self, conn: psycopg.Connection) -> None:
+        """Clear borrower session state before returning a pooled connection."""
+        conn.execute(
+            "RESET ALL; "
+            "SET search_path = ag_catalog, '$user', public; "
+            f"SET statement_timeout = '{getattr(self, '_statement_timeout_ms', DEFAULT_STATEMENT_TIMEOUT_MS)}ms'"
+        )
+        with self._metrics_lock:
+            self._resets_on_return += 1
+
+    def _ensure_open(self) -> None:
+        if getattr(self, "_closed", False):
+            raise RuntimeError(
+                f"AGEClient for ({getattr(self, '_dsn', '')}, "
+                f"{getattr(self, '_graph', '')}) is closed and cannot be reused"
+            )
+
+    def _lifecycle_lock(self) -> Any:
+        """Return the pool lifecycle lock, including for legacy test doubles."""
+        pool_lock = getattr(self, "_pool_lock", None)
+        if pool_lock is None:
+            pool_lock = threading.Lock()
+            self._pool_lock = pool_lock
+        return pool_lock
+
+    def _assert_open_under_pool_lock(self) -> None:
+        """Check lifecycle state under the lock shared with close_sync()."""
+        with self._lifecycle_lock():
+            self._ensure_open()
 
     def _connect_fresh(self, *, autocommit: bool) -> psycopg.Connection:
-        conn = psycopg.connect(self._dsn, autocommit=autocommit, connect_timeout=15)
+        with self._lifecycle_lock():
+            self._ensure_open()
+            conn = psycopg.connect(
+                self._dsn,
+                autocommit=autocommit,
+                connect_timeout=getattr(self, "_connect_timeout_seconds", DEFAULT_CONNECT_TIMEOUT_SECONDS),
+                prepare_threshold=None,
+            )
         self._configure_age_session(conn)
         return conn
 
-    def _ensure_pool(self):
-        if getattr(self, "_pool", None) is not None:
-            return self._pool
-        with self._pool_lock:
+    def _ensure_pool(self) -> Any:
+        with self._lifecycle_lock():
+            self._ensure_open()
+            if not self._pool_requested:
+                raise RuntimeError("AGE connection pool was not requested")
+            if not self._pool_available:
+                raise RuntimeError(
+                    "AGE connection pool requested but psycopg_pool is unavailable"
+                )
             if getattr(self, "_pool", None) is not None:
                 return self._pool
             try:
@@ -199,25 +359,33 @@ class AGEClient:
 
                 self._pool = ConnectionPool(
                     conninfo=self._dsn,
-                    min_size=getattr(self, "_pool_min_size", 3),
-                    max_size=getattr(self, "_pool_max_size", 15),
-                    kwargs={"autocommit": True, "connect_timeout": 15},
+                    min_size=self._pool_min_size,
+                    max_size=self._pool_max_size,
+                    kwargs={
+                        "autocommit": True,
+                        "connect_timeout": self._connect_timeout_seconds,
+                        "prepare_threshold": None,
+                    },
                     configure=self._configure_age_session,
+                    reset=self._reset_age_session,
                     max_idle=60,
                     max_lifetime=300,
                     reconnect_timeout=300,
                     reconnect_failed=_pool_reconnect_failed,
                     open=True,
+                    timeout=self._pool_timeout_seconds,
                 )
+                wait = getattr(self._pool, "wait", None)
+                if callable(wait):
+                    wait(timeout=self._pool_timeout_seconds)
             except Exception as exc:
-                logger.warning(
-                    "AGE connection pool initialization failed; falling back to warm connection reuse: %s",
-                    exc,
-                )
-                self._pool_available = False
-                self._connection_mode = "warm_fallback"
+                logger.error("AGE connection pool initialization failed: %s", exc)
+                failed_pool = getattr(self, "_pool", None)
+                if failed_pool is not None:
+                    failed_pool.close()
                 self._pool = None
-        return self._pool
+                raise RuntimeError("AGE connection pool initialization failed") from exc
+            return self._pool
 
     def _ensure_warm_connection(self) -> psycopg.Connection:
         warm_conn = getattr(self, "_warm_conn", None)
@@ -237,32 +405,80 @@ class AGEClient:
                 logger.debug("Failed to close warm AGE connection", exc_info=True)
 
     def _sync_connect(self) -> None:
+        self._assert_open_under_pool_lock()
         mode = self.connection_mode
         if mode == "pooled":
-            if self._ensure_pool() is None:
-                with getattr(self, "_warm_lock", threading.RLock()):
-                    self._ensure_warm_connection()
+            self._ensure_pool()
+        elif mode == "pool_unavailable":
+            raise RuntimeError(
+                "AGE connection pool requested but psycopg_pool is unavailable"
+            )
         elif mode == "warm_fallback":
             with getattr(self, "_warm_lock", threading.RLock()):
                 self._ensure_warm_connection()
 
+    @contextmanager
+    def _pooled_connection(self) -> Iterator[psycopg.Connection]:
+        pool = self._ensure_pool()
+        from psycopg_pool import PoolClosed
+
+        borrowed = False
+        try:
+            with ExitStack() as stack:
+                try:
+                    conn = stack.enter_context(
+                        pool.connection(timeout=self._pool_timeout_seconds)
+                    )
+                except PoolClosed as exc:
+                    raise RuntimeError("AGE client is closed") from exc
+                borrowed = True
+                with self._metrics_lock:
+                    self._total_checkouts += 1
+                    checked_out = self._total_checkouts - self._total_returns
+                logger.debug(
+                    "[POOL] Borrow from (%s, %s). Checked out: %d/%d.",
+                    self.redacted_dsn(), self._graph, checked_out, self._pool_max_size,
+                )
+                yield conn
+        except Exception as exc:
+            if type(exc).__name__ in {"PoolTimeout", "TimeoutError"}:
+                raise RuntimeError(
+                    "AGE connection pool acquisition timeout after "
+                    f"{self._pool_timeout_seconds:.1f}s"
+                ) from exc
+            raise
+        finally:
+            # The pool context has completed its reset callback before this
+            # trace is emitted, including when the borrower raised.
+            if borrowed:
+                with self._metrics_lock:
+                    self._total_returns += 1
+                    idle = max(
+                        0,
+                        self._total_returns
+                        - self._total_checkouts
+                        + self._pool_max_size,
+                    )
+                logger.debug(
+                    "[POOL] Return to (%s, %s). Reset executed. Idle: %d.",
+                    self.redacted_dsn(), self._graph, idle,
+                )
+
     def _sync_close(self) -> None:
-        pool_lock = getattr(self, "_pool_lock", None)
-        if pool_lock is None:
-            pool_lock = threading.Lock()
-            self._pool_lock = pool_lock
-        with pool_lock:
+        with self._lifecycle_lock():
             if self._closed:
                 return
+            self._closed = True
             pool = getattr(self, "_pool", None)
-            try:
-                if pool is not None:
-                    pool.close()
-            finally:
-                self._pool = None
-                self._closed = True
+            self._pool = None
+        if pool is not None:
+            pool.close()
         with getattr(self, "_warm_lock", threading.RLock()):
             self._discard_warm_connection()
+
+    def close_sync(self) -> None:
+        """Synchronously close owned resources for process reset paths."""
+        self._sync_close()
 
     # ── graph setup ───────────────────────────────────────────────────────────
 
@@ -307,7 +523,9 @@ class AGEClient:
         except (json.JSONDecodeError, TypeError):
             return val
 
-    def _normalize_value(self, value):
+    def _normalize_value(
+        self, value: Any, *, preserve_strings: bool = False,
+    ) -> Any:
         """
         Normalize AGE agtype values to clean Python types.
         Called once per field in _sync_execute after _parse_agtype.
@@ -325,6 +543,8 @@ class AGEClient:
         before this method is called. Coercing string scalars here would
         mistype string IDs that happen to be numeric.
         """
+        if preserve_strings and isinstance(value, str):
+            return value
         if value is None:
             return None
         if isinstance(value, str):
@@ -482,16 +702,13 @@ class AGEClient:
             try:
                 mode = self.connection_mode
                 if mode == "pooled":
-                    pool = self._ensure_pool()
-                    if pool is None:
-                        with getattr(self, "_warm_lock", threading.RLock()):
-                            conn = self._ensure_warm_connection()
-                            cur = conn.execute(sql)
-                            rows = cur.fetchall()
-                    else:
-                        with pool.connection() as conn:
-                            cur = conn.execute(sql)
-                            rows = cur.fetchall()
+                    with self._pooled_connection() as conn:
+                        cur = conn.execute(sql)
+                        rows = cur.fetchall()
+                elif mode == "pool_unavailable":
+                    raise RuntimeError(
+                        "AGE connection pool requested but psycopg_pool is unavailable"
+                    )
                 elif mode == "warm_fallback":
                     with getattr(self, "_warm_lock", threading.RLock()):
                         conn = self._ensure_warm_connection()
@@ -530,6 +747,8 @@ class AGEClient:
         conn: psycopg.Connection,
         cypher: str,
         parameters: Optional[Dict[str, Any]] = None,
+        *,
+        preserve_strings: bool = False,
     ) -> List[Dict[str, Any]]:
         if not cypher.strip():
             return []
@@ -549,11 +768,22 @@ class AGEClient:
             row_dict: Dict[str, Any] = {}
             for i, col in enumerate(columns):
                 raw = row[i] if i < len(row) else None
-                row_dict[col] = self._normalize_value(self._parse_agtype(raw))
+                row_dict[col] = self._normalize_value(
+                    self._parse_agtype(raw),
+                    preserve_strings=preserve_strings,
+                )
             results.append(row_dict)
         return results
 
     def _sync_transaction(self, operation: Callable[["AGETransaction"], T]) -> T:
+        if self.connection_mode == "pooled":
+            with self._pooled_connection() as conn:
+                with conn.transaction():
+                    return operation(AGETransaction(self, conn))
+        if self.connection_mode == "pool_unavailable":
+            raise RuntimeError(
+                "AGE connection pool requested but psycopg_pool is unavailable"
+            )
         with self._connect_fresh(autocommit=False) as conn:
             tx = AGETransaction(self, conn)
             try:
@@ -565,6 +795,7 @@ class AGEClient:
             return result
 
     async def run_transaction(self, operation: Callable[["AGETransaction"], T]) -> T:
+        self._assert_open_under_pool_lock()
         result = await asyncio.to_thread(
             cast(Callable[[Callable[["AGETransaction"], T]], T], self._sync_transaction),
             operation,
@@ -582,6 +813,7 @@ class AGEClient:
 
         Async interface — sync I/O runs in thread pool via to_thread().
         """
+        self._assert_open_under_pool_lock()
         return await asyncio.to_thread(
             self._sync_execute, query, parameters
         )
@@ -1174,20 +1406,61 @@ class AGETransaction:
     def execute_sql(self, sql: str, parameters: Optional[tuple[Any, ...]] = None) -> Any:
         return self._conn.execute(sql, parameters)
 
+    def run_bounded_cypher(self, cypher: str) -> List[Dict[str, Any]]:
+        """Execute compiled literal-bound Cypher with a safe outer SQL literal.
+
+        A caller's text may contain SQL dollar delimiters. A collision-free
+        delimiter protects that boundary; AGEClient._S owns the inner Cypher
+        boundary and SQL Literal quotes the graph name.
+        """
+        from psycopg import sql
+
+        _check_safe_cypher(cypher)
+        columns = self._client._extract_columns(cypher)
+        # AGE requires a dollar-quoted query. Choose a delimiter absent from
+        # the fully serialized query; caller text cannot terminate it.
+        tag = "$bounded$"
+        while tag in cypher:
+            tag = tag[:-1] + "_" + "$"
+        statement = sql.SQL("SELECT * FROM ag_catalog.cypher({}, {}) AS ({})").format(
+            sql.Literal(self._client._graph), sql.SQL(tag + cypher + tag),
+            sql.SQL(", ").join(sql.SQL("{} agtype").format(sql.Identifier(c)) for c in columns),
+        )
+        rows = self._conn.execute(statement).fetchall()
+        return [
+            {name: _decode_bounded_value(name, self._client._parse_agtype(row[i]))
+             for i, name in enumerate(columns)}
+            for row in rows
+        ]
+
     def run_cypher(
         self,
         cypher: str,
         parameters: Optional[Dict[str, Any]] = None,
+        *,
+        preserve_strings: bool = False,
     ) -> List[Dict[str, Any]]:
-        return self._client._execute_cypher_on_connection(self._conn, cypher, parameters)
+        return self._client._execute_cypher_on_connection(
+            self._conn,
+            cypher,
+            parameters,
+            preserve_strings=preserve_strings,
+        )
 
 
 # ── module-level singleton + factory ──────────────────────────────────────────
 
 _client: Optional[AGEClient] = None
+_clients: dict[tuple[str, str], AGEClient] = {}
+_clients_lock = threading.RLock()
 
 
-def get_graph_client(dsn: str, graph_name: str) -> AGEClient:
+def get_graph_client(
+    dsn: str,
+    graph_name: str,
+    *,
+    use_pool: bool | None = None,
+) -> AGEClient:
     """
     Return the shared AGEClient singleton.
 
@@ -1201,18 +1474,70 @@ def get_graph_client(dsn: str, graph_name: str) -> AGEClient:
         graph_client = _age_factory(dsn=config.dsn, graph_name=config.graph)
     """
     global _client
-    if _client is None:
-        _client = AGEClient(dsn=dsn, graph_name=graph_name)
-    else:
-        requested_dsn = _with_sslmode_disabled(str(dsn).strip())
-        requested_graph = str(graph_name).strip()
-        if _client._dsn != requested_dsn or _client._graph != requested_graph:
-            logger.warning(
-                "AGE graph client singleton configuration mismatch: "
-                "existing_dsn=%s requested_dsn=%s existing_graph=%s requested_graph=%s",
-                redact_dsn(_client._dsn),
-                redact_dsn(requested_dsn),
-                _client._graph,
-                requested_graph,
+    requested_dsn = _with_sslmode_disabled(str(dsn).strip())
+    requested_graph = str(graph_name).strip()
+    requested_pool = (
+        _env_truthy("AGE_USE_POOL")
+        if use_pool is None and "AGE_USE_POOL" in os.environ
+        else (True if use_pool is None else bool(use_pool))
+    )
+    if not requested_pool:
+        return AGEClient(
+            dsn=requested_dsn,
+            graph_name=requested_graph,
+            use_pool=False,
+        )
+    key = (requested_dsn, requested_graph)
+    with _clients_lock:
+        client = _clients.get(key)
+        if client is None or client._closed:
+            if client is not None:
+                _clients.pop(key, None)
+                client.close_sync()
+            if len(_clients) >= MAX_CLIENTS:
+                raise RuntimeError(
+                    f"AGE client registry full ({MAX_CLIENTS} clients). "
+                    "Close an existing client before creating a new one."
+                )
+            client = AGEClient(
+                dsn=requested_dsn,
+                graph_name=requested_graph,
+                use_pool=True,
             )
-    return _client
+            _clients[key] = client
+        _client = client
+        return client
+
+
+def close_all_graph_clients() -> None:
+    """Close and remove every shared AGE client."""
+    global _client
+    with _clients_lock:
+        clients = list({id(client): client for client in _clients.values()}.values())
+        _clients.clear()
+        _client = None
+    for client in clients:
+        client.close_sync()
+
+
+def reset_graph_clients() -> None:
+    """Backward-compatible alias for closing the shared client registry."""
+    close_all_graph_clients()
+
+
+def reset_graph_client(dsn: str, graph_name: str) -> None:
+    """Close and remove one shared AGE client without disturbing peers."""
+    global _client
+    key = (
+        _with_sslmode_disabled(str(dsn).strip()),
+        str(graph_name).strip(),
+    )
+    with _clients_lock:
+        client = _clients.pop(key, None)
+        if _client is client:
+            _client = None
+    if client is not None:
+        client.close_sync()
+
+
+atexit.register(close_all_graph_clients)

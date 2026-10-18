@@ -44,13 +44,14 @@ class FakeGraphStore:
         self.calls.append(("get_decision", decision_id, domain))
         return self.decisions.get(decision_id)
 
-    def get_decisions(self, domain, category=None, limit=400):
-        self.calls.append(("get_decisions", domain, category, limit))
-        return list(self.decisions.values())[:limit]
+    def get_decisions(self, domain, category=None, limit=400, *, offset=0, chronological=False):
+        self.calls.append(("get_decisions", domain, category, limit, offset, chronological))
+        return list(self.decisions.values())[offset:offset + limit]
 
-    def get_verified_decisions(self, domain):
-        self.calls.append(("get_verified_decisions", domain))
-        return list(self.verified)
+    def get_verified_decisions(self, domain, *, offset=0, limit=None, chronological=False, verified_after=None):
+        self.calls.append(("get_verified_decisions", domain, offset, limit, chronological, verified_after))
+        rows = list(self.verified)[offset:]
+        return rows if limit is None else rows[:limit]
 
     def get_all_decisions(self, domain):
         self.calls.append(("get_all_decisions", domain))

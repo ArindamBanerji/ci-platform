@@ -10,11 +10,22 @@ from copilot_sdk.testing import age_available
 
 
 class FakeTransaction:
-    def __init__(self):
+    def __init__(self, client=None):
         self.cypher = []
+        self.sql = []
+        self.client = client
+
+    def execute_sql(self, query, parameters=None):
+        self.sql.append((query, parameters))
+        return []
 
     def run_cypher(self, query):
         self.cypher.append(query)
+        if "MATCH (s:BoundedDomain)" in query:
+            return []
+        if self.client is not None and self.client.responses:
+            self.client.queries.append((query, None))
+            return self.client.responses.pop(0)
         if "CREATE (" in query or "MERGE (" in query or "MATCH (d)-[:" in query:
             return [{"ok": True}]
         return []
@@ -23,7 +34,7 @@ class FakeTransaction:
 class FakeAGEClient:
     instances: list["FakeAGEClient"] = []
 
-    def __init__(self, dsn=None, graph_name=None):
+    def __init__(self, dsn=None, graph_name=None, **kwargs):
         self.dsn = dsn
         self.graph_name = graph_name
         self._graph = graph_name
@@ -33,7 +44,12 @@ class FakeAGEClient:
         self.rolled_back_transactions = []
         self.closed = False
         self.s_calls = []
+        self.kwargs = kwargs
+        self.sync_connect_calls = 0
         FakeAGEClient.instances.append(self)
+
+    def _sync_connect(self):
+        self.sync_connect_calls += 1
 
     def _S(self, value):
         self.s_calls.append(value)
@@ -52,7 +68,7 @@ class FakeAGEClient:
         return []
 
     async def run_transaction(self, fn):
-        tx = FakeTransaction()
+        tx = FakeTransaction(self)
         try:
             result = fn(tx)
         except Exception:
@@ -97,6 +113,65 @@ def _conservation_payload(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def test_graph_store_eagerly_initializes_requested_pool(fake_age_client):
+    from ci_platform.graph.age_graph_store import AGEGraphStore
+
+    AGEGraphStore(
+        dsn="postgresql://example/test", graph_name="test_graph", use_pool=True
+    )
+    client = FakeAGEClient.instances[-1]
+    assert client.kwargs["use_pool"] is True
+    assert client.sync_connect_calls == 1
+
+
+def test_governed_decision_uses_one_transaction_and_one_mutation_statement(
+    fake_age_client, monkeypatch
+):
+    store = _new_store(fake_age_client)
+    client = FakeAGEClient.instances[-1]
+    metadata = {
+        "decision_id": "DEC-G-1",
+        "source": "score",
+        "scorer_version": "v1",
+        "preset_version": "p1",
+        "factor_schema_version": "f1",
+        "factor_names": ["signal"],
+        "factor_vector": [0.7],
+        "probabilities": [0.8, 0.2],
+        "category_index": 0,
+        "recommended_index": 0,
+    }
+    existing = {
+        "decision_id": "DEC-G-1", "domain": "trading", "category": "trend",
+        "category_index": 0, "recommended_action": "execute", "recommended_index": 0,
+        "confidence": 0.8, "probabilities": [0.8, 0.2], "factor_vector": [0.7],
+        "factor_names": ["signal"], "source": "score", "scorer_version": "v1",
+        "preset_version": "p1", "factor_schema_version": "f1", "metadata": metadata,
+        "status": "pending",
+    }
+
+    async def existing_transaction(fn):
+        tx = FakeTransaction()
+        result = fn(tx)
+        client.transactions.append(tx)
+        return result
+
+    monkeypatch.setattr(client, "run_transaction", existing_transaction)
+    store.write_governed_decision(
+        decision_id="DEC-G-1", domain="trading", category="trend", category_index=0,
+        recommended_action="execute", recommended_index=0, confidence=0.8,
+        probabilities=[0.8, 0.2], factor_vector=[0.7], factor_names=["signal"],
+        scorer_version="v1", preset_version="p1", factor_schema_version="f1",
+    )
+    assert len(client.transactions) == 1
+    assert "pg_advisory_xact_lock" in client.transactions[0].sql[0][0]
+    assert len(client.transactions[0].sql) == 2
+    assert "existing_count = 1" in client.transactions[0].sql[1][0]
+    assert "CREATE (d:Decision" in client.transactions[0].sql[1][0]
+    assert len(client.transactions[0].cypher) == 1
+    assert "MATCH (s:BoundedDomain)" in client.transactions[0].cypher[0]
 
 
 def _welford_state(n_all=4):
@@ -404,7 +479,7 @@ def test_write_decision_uses_no_param_placeholders(fake_age_client):
 
     assert re.match(r"DEC-[0-9a-f]{8}", decision_id)
     transaction_queries = FakeAGEClient.instances[0].transactions[0].cypher
-    query = transaction_queries[0]
+    query = next(q for q in transaction_queries if "CREATE (d:Decision" in q)
     assert "$" not in query
     assert "ON CREATE SET" not in query
     assert any("IN_DOMAIN" in item for item in transaction_queries)
@@ -424,7 +499,7 @@ def test_write_decision_sets_pending_status_and_domain(fake_age_client):
     )
 
     transaction_queries = FakeAGEClient.instances[0].transactions[0].cypher
-    query = transaction_queries[0]
+    query = next(q for q in transaction_queries if "CREATE (d:Decision" in q)
     assert "CREATE (d:Decision" in query
     assert "domain: 'trading'" in query
     assert "status: 'pending'" in query
@@ -446,7 +521,7 @@ def test_decision_domain_not_null_for_runtime_write(fake_age_client):
         factors={"impact_scope": 0.95},
     )
 
-    query = FakeAGEClient.instances[0].transactions[0].cypher[0]
+    query = next(q for q in FakeAGEClient.instances[0].transactions[0].cypher if "CREATE (d:Decision" in q)
     assert "domain: 'dataops'" in query
     assert "domain: null" not in query
 
@@ -742,6 +817,108 @@ def test_get_verified_decisions_merges_outcome(fake_age_client):
             "is_correct": True,
         }
     ]
+
+
+def test_decision_reads_apply_native_skip_and_limit(fake_age_client):
+    store = _new_store(fake_age_client)
+    FakeAGEClient.instances[0].responses.extend([[], [], []])
+
+    store.get_decisions("soc", limit=10, offset=100)
+    store.get_verified_decisions(
+        "soc", limit=1_000, offset=1_000, chronological=True,
+    )
+    store.get_verified_decisions(
+        "soc",
+        limit=10,
+        chronological=True,
+        verified_after=(1_700_000_000.5, "DEC-100"),
+    )
+
+    decision_query, verified_query, cursor_query = [
+        query for query, _ in FakeAGEClient.instances[0].queries
+    ]
+    assert "ORDER BY d.created_at DESC, d.decision_id ASC" in decision_query
+    assert "SKIP 100" in decision_query
+    assert "LIMIT 10" in decision_query
+    assert "ORDER BY _created_at ASC, _decision_id ASC" in verified_query
+    assert "SKIP 1000" in verified_query
+    assert "LIMIT 1000" in verified_query
+    assert "coalesce(o.verified_at, d.created_at) AS _verified_at" in cursor_query
+    assert "_verified_at > 1700000000.5" in cursor_query
+    assert "d.decision_id > 'DEC-100'" in cursor_query
+    assert "ORDER BY _verified_at ASC, _decision_id ASC" in cursor_query
+
+
+@pytest.mark.age
+def test_verified_pagination_visits_all_exactly_once(age_test_graph):
+    from datetime import datetime, timezone
+    from ci_platform.graph.age_graph_store import AGEGraphStore
+
+    dsn, graph = age_test_graph
+    store = AGEGraphStore(dsn=dsn, graph_name=graph, use_pool=False)
+    domain = f"r6_paging_{uuid.uuid4().hex[:8]}"
+
+    def timestamp(day):
+        return datetime(2024, 1, day, tzinfo=timezone.utc).timestamp()
+
+    try:
+        for index, verified_day in enumerate([15, 10, 20, 8, 12], start=1):
+            decision_id = store.write_decision(
+                domain, "category", "approve", 0.8, {},
+                metadata={
+                    "decision_id": f"D{index}",
+                    "created_at": timestamp(index),
+                },
+            )
+            store.write_outcome(
+                decision_id, "approve", True, domain=domain,
+                metadata={"verified_at": timestamp(verified_day)},
+            )
+
+        cursor = (0.0, "")
+        seen = []
+        for _ in range(4):
+            page = store.get_verified_decisions(
+                domain, limit=2, verified_after=cursor,
+            )
+            if not page:
+                break
+            keys = [
+                (
+                    float(row.get("verified_at", row["created_at"])),
+                    row["decision_id"],
+                )
+                for row in page
+            ]
+            assert keys == sorted(keys)
+            assert all(key > cursor for key in keys)
+            ids = [row["decision_id"] for row in page]
+            assert set(ids).isdisjoint(seen)
+            seen.extend(ids)
+            cursor = keys[-1]
+        else:
+            pytest.fail("Pagination did not terminate")
+
+        assert seen == ["D4", "D2", "D5", "D1", "D3"]
+        assert len(seen) == len(set(seen)) == 5
+    finally:
+        store.close()
+
+
+def test_keyset_cursor_suppresses_skip(fake_age_client):
+    store = _new_store(fake_age_client)
+    store.get_verified_decisions(
+        "soc", limit=2, offset=13, verified_after=(100.0, "D1"),
+    )
+    store.get_verified_decisions("soc", limit=2, offset=13)
+
+    cursor_query, offset_query = [
+        query for query, _ in FakeAGEClient.instances[-1].queries
+    ]
+    assert re.search(r"\bSKIP\b", cursor_query) is None
+    assert re.search(r"\bSKIP\s+13\b", offset_query)
+    assert re.search(r"\bLIMIT\s+2\b", cursor_query)
+    assert re.search(r"\bLIMIT\s+2\b", offset_query)
 
 
 def test_count_methods_parse_ints(fake_age_client):
