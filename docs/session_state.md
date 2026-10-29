@@ -1057,3 +1057,12 @@ Overall verdict: FAIL — namespace reservation gates R2-01/R2-02/R2-03 and guar
 New findings: 0 new namespace-reservation findings. One pre-existing P2 SDK ordering defect remains an acceptance blocker because it currently fails both in the full suite and in isolation.
 P1 findings: 0. P2 findings: 1. P3 findings: 0.
 P2 bounded core is not accepted by this final gate. P4 remains blocked pending a zero-failure SDK baseline.
+
+## Fix 3: seed_dataops_graph.py domain property (COMPLETE)
+
+- Added `domain: 'dataops'` to DataQualityAlert nodes in `create_alert_query()`.
+- Added `domain: 'dataops'` to PipelineSystem nodes in `create_system_query()`.
+- All node CREATE statements now include the domain property.
+- Mypy: PASS (`Success: no issues found in 1 source file`).
+- ci-platform tests: PASS (`869 passed`, 0 failures).
+- Files changed: `scripts/seed_dataops_graph.py` (1 implementation file, 2 lines added).

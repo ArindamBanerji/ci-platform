@@ -197,6 +197,7 @@ async def delete_dataops_graph(client: AGEClient) -> None:
 def create_system_query(system: dict[str, Any]) -> str:
     return f"""
 CREATE (s:{PIPELINE_SYSTEM} {{
+    domain: 'dataops',
     name: {_S(system["name"])},
     display_name: {_S(system["display_name"])},
     sla_minutes: {int(system["sla_minutes"])},
@@ -227,6 +228,7 @@ RETURN r
 def create_alert_query(alert: dict[str, Any]) -> str:
     return f"""
 CREATE (a:{DATA_QUALITY_ALERT} {{
+    domain: 'dataops',
     alert_id: {_S(alert["alert_id"])},
     source_event_id: {_S(alert["source_event_id"])},
     system_name: {_S(alert["system_name"])},
