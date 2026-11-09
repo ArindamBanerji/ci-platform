@@ -22,6 +22,7 @@ import psycopg
 from ci_platform.graph.age_client import AGEClient, AGETransaction
 from ci_platform.graph import bounded_projection_migration as bounded
 from copilot_sdk.graph.namespace import is_internal_namespace
+from copilot_sdk.outcome_perf import timed as _outcome_timed, emit as _outcome_perf_emit, enabled as _outcome_perf_enabled
 
 
 log = logging.getLogger(__name__)
@@ -799,6 +800,7 @@ class AGEGraphStore:
             "old_status": cls._normalize_optional_conservation_status(old_status),
         }
 
+    @_outcome_timed("age_query_roundtrip")
     def _run_query(self, cypher: str) -> List[Dict[str, Any]]:
         try:
             return self._run(self._client.run_query(cypher, None)) or []
@@ -1429,6 +1431,7 @@ class AGEGraphStore:
             transaction=transaction,
         )
 
+    @_outcome_timed("write_outcome")
     def _write_outcome_impl(
         self,
         decision_id: str,
@@ -1470,7 +1473,10 @@ class AGEGraphStore:
         metadata_json = json.dumps(metadata_dict, sort_keys=True)
         status = "confirmed" if bool(is_correct) else "overridden"
         domain_literal = self._S(self._validated_domain(domain))
-        decision_domain_where = f"WHERE d.domain = {domain_literal}"
+        decision_domain_where = (
+            f"WHERE d.domain = {domain_literal} "
+            f"AND d.decision_id = {self._S(decision_id)}"
+        )
         outcome_pattern = f"{{decision_id: {self._S(decision_id)}, domain: {domain_literal}}}"
         decision_updates = [
             f"d.status = {self._S(status)}",
@@ -1498,7 +1504,7 @@ class AGEGraphStore:
             decision_updates.append(f"d.{property_name} = {serialized}")
         decision_set = ",\n            ".join(decision_updates)
         query = f"""
-        MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
+        MATCH (d:Decision)
         {decision_domain_where}
         OPTIONAL MATCH (d)-[:HAS_OUTCOME]->(linked:Outcome)
         WITH d, count(linked) AS linked_outcome_count
@@ -1560,11 +1566,14 @@ class AGEGraphStore:
             tx = transaction
             run_query = lambda cypher: tx.run_cypher(cypher)
         domain_literal = self._S(self._validated_domain(domain))
-        decision_domain_where = f"WHERE d.domain = {domain_literal}"
+        decision_domain_where = (
+            f"WHERE d.domain = {domain_literal} "
+            f"AND d.decision_id = {self._S(decision_id)}"
+        )
         outcome_pattern = f"{{decision_id: {self._S(decision_id)}, domain: {domain_literal}}}"
         decision_rows = run_query(
             f"""
-            MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
+            MATCH (d:Decision)
             {decision_domain_where}
             RETURN d.status AS status
             LIMIT 1
@@ -1574,7 +1583,7 @@ class AGEGraphStore:
             raise KeyError(decision_id)
         linked_rows = run_query(
             f"""
-            MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
+            MATCH (d:Decision)
             {decision_domain_where}
             OPTIONAL MATCH (d)-[:HAS_OUTCOME]->(linked:Outcome)
             RETURN count(linked) AS cnt
@@ -1591,7 +1600,7 @@ class AGEGraphStore:
         if linked_count > 0:
             existing_rows = run_query(
                 f"""
-                MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
+                MATCH (d:Decision)
                 {decision_domain_where}
                 MATCH (d)-[:HAS_OUTCOME]->(linked:Outcome)
                 RETURN linked.actual_action AS actual_action, linked.is_correct AS is_correct
@@ -1758,9 +1767,10 @@ class AGEGraphStore:
             run_query = lambda cypher: tx.run_cypher(cypher)
         run_query(
             f"""
-            MATCH (d:Decision {{decision_id: {self._S(str(decision_id))}}})
+            MATCH (d:Decision)
             MATCH (c:CentroidCheckpoint {{checkpoint_id: {self._S(str(checkpoint_id))}}})
-            WHERE d.domain = {self._S(domain)}
+            WHERE d.decision_id = {self._S(str(decision_id))}
+              AND d.domain = {self._S(domain)}
               AND c.domain = {self._S(domain)}
             OPTIONAL MATCH (d)-[snapshot:SNAPSHOT_AFTER]->(c)
             WITH d, c, count(snapshot) AS snapshot_count
@@ -2049,6 +2059,7 @@ class AGEGraphStore:
             decision_id=decision_id,
         )
 
+    @_outcome_timed("checkpoint_write")
     def _write_centroid_checkpoint_impl(
         self,
         checkpoint_id: str,
@@ -2964,12 +2975,15 @@ class AGEGraphStore:
         *,
         include_outcome: bool = False,
     ) -> Optional[Dict[str, Any]]:
+        # Keep decision_id as an explicit property predicate. AGE 1.7 compiles
+        # the inline-map form to ``properties @> ...``, which cannot use the
+        # Decision.decision_id btree expression index installed by SOC startup.
         domain_clause = f"WHERE d.domain = {self._S(self._validated_domain(domain))}"
         if include_outcome:
             rows = self._run_query(
                 f"""
-                MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
-                {domain_clause}
+                MATCH (d:Decision)
+                {domain_clause} AND d.decision_id = {self._S(decision_id)}
                 OPTIONAL MATCH (d)-[:HAS_OUTCOME]->(o:Outcome)
                 RETURN properties(d) AS d, properties(o) AS o
                 LIMIT 1
@@ -2983,8 +2997,8 @@ class AGEGraphStore:
             return self._merge_decision_outcome(row)
         rows = self._run_query(
             f"""
-            MATCH (d:Decision {{decision_id: {self._S(decision_id)}}})
-            {domain_clause}
+            MATCH (d:Decision)
+            {domain_clause} AND d.decision_id = {self._S(decision_id)}
             RETURN d
             LIMIT 1
             """
@@ -3023,6 +3037,7 @@ class AGEGraphStore:
         )
         return [self._node_to_dict(row.get("d", row)) for row in rows]
 
+    @_outcome_timed("age_verified_history")
     def get_verified_decisions(
         self,
         domain: str,
@@ -3621,6 +3636,7 @@ class AGEGraphStore:
             return
         self._run_query(f"CREATE (c:CentroidCheckpoint {props}) RETURN c")
 
+    @_outcome_timed("load_latest_centroids")
     def load_latest_centroids(self, domain: str) -> Any | None:
         checkpoints = self.get_centroid_checkpoints(
             domain,
@@ -3802,6 +3818,7 @@ class AGEGraphStore:
             "created_at": link.get("created_at") or row.get("created_at"),
         }
 
+    @_outcome_timed("get_centroid_checkpoints")
     def get_centroid_checkpoints(
         self,
         domain: str,
@@ -3821,6 +3838,7 @@ class AGEGraphStore:
             {limit_clause}
             """
         )
+        _convert_started = time.perf_counter() if _outcome_perf_enabled() else 0.0
         checkpoints = []
         for row in rows:
             checkpoint = self._node_to_dict(row.get("c", row))
@@ -3829,18 +3847,35 @@ class AGEGraphStore:
                     checkpoint.get("created_at")
                 )
             checkpoints.append(checkpoint)
+        _outcome_perf_emit(log, "checkpoint_convert", _convert_started, len(checkpoints))
+        _sort_started = time.perf_counter() if _outcome_perf_enabled() else 0.0
         checkpoints.sort(
             key=lambda item: float(item.get("created_at", 0.0)),
             reverse=limit is None,
         )
+        _outcome_perf_emit(log, "checkpoint_sort", _sort_started, len(checkpoints))
         if limit is None:
             return checkpoints
         return checkpoints[-max(int(limit), 0):]
 
+    @_outcome_timed("has_centroid_checkpoint")
+    def has_centroid_checkpoint(self, checkpoint_id: str, domain: str) -> bool:
+        """Return whether one V2 checkpoint ID exists in a domain."""
+        rows = self._run_query(
+            f"""
+            MATCH (c:CentroidCheckpoint)
+            WHERE c.checkpoint_id = {self._S(str(checkpoint_id))}
+              AND c.domain = {self._S(str(domain))}
+            RETURN count(c) AS cnt
+            LIMIT 1
+            """
+        )
+        return bool(rows and int(rows[0].get("cnt", 0)) > 0)
+
     def load_latest_checkpoint_for_regime(
         self, domain: str, regime_tag: str
     ) -> Dict[str, Any] | None:
-        checkpoints = self.get_centroid_checkpoints(
+        checkpoints: List[Dict[str, Any]] = self.get_centroid_checkpoints(
             str(domain), include_v2=True, limit=None
         )
         matching = [

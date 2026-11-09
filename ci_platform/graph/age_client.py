@@ -34,6 +34,7 @@ import random
 import re
 import threading
 import time
+from copilot_sdk.outcome_perf import timed as _outcome_timed, emit as _outcome_perf_emit, enabled as _outcome_perf_enabled
 import uuid
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
@@ -364,9 +365,14 @@ class AGEClient:
                     kwargs={
                         "autocommit": True,
                         "connect_timeout": self._connect_timeout_seconds,
+                        "keepalives": 1,
+                        "keepalives_idle": 30,
+                        "keepalives_interval": 10,
+                        "keepalives_count": 3,
                         "prepare_threshold": None,
                     },
                     configure=self._configure_age_session,
+                    check=ConnectionPool.check_connection,
                     reset=self._reset_age_session,
                     max_idle=60,
                     max_lifetime=300,
@@ -676,6 +682,7 @@ class AGEClient:
         escaped = str(val).replace("'", "\\'")
         return f"'{escaped}'"
 
+    @_outcome_timed("age_execute")
     def _sync_execute(
         self, cypher: str, parameters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
@@ -696,6 +703,7 @@ class AGEClient:
         columns = self._extract_columns(query)
         sql = self._build_sql(query, columns)
 
+        _fetch_started = time.perf_counter() if _outcome_perf_enabled() else 0.0
         rows: Any = None
         MAX_RETRIES = 3
         for attempt in range(MAX_RETRIES):
@@ -733,6 +741,8 @@ class AGEClient:
                 )
                 raise
 
+        _outcome_perf_emit(logger, "age_fetch", _fetch_started, len(rows) if rows is not None else 0)
+        _parse_started = time.perf_counter() if _outcome_perf_enabled() else 0.0
         results: List[Dict[str, Any]] = []
         for row in cast(List[Any], rows):
             row_dict: Dict[str, Any] = {}
@@ -740,8 +750,10 @@ class AGEClient:
                 raw = row[i] if i < len(row) else None
                 row_dict[col] = self._normalize_value(self._parse_agtype(raw))
             results.append(row_dict)
+        _outcome_perf_emit(logger, "age_decode", _parse_started, len(results))
         return results
 
+    @_outcome_timed("age_transaction_query")
     def _execute_cypher_on_connection(
         self,
         conn: psycopg.Connection,
@@ -826,7 +838,7 @@ class AGEClient:
         """
         results = await self.run_query(
             """
-            MATCH (alert:Alert {alert_id: $alert_id})
+            MATCH (alert:Alert) WHERE alert.alert_id = $alert_id
             OPTIONAL MATCH (alert)-[:INVOLVES]->(asset:Asset)
             OPTIONAL MATCH (alert)-[:INVOLVES]->(user:User)
             OPTIONAL MATCH (alert)-[:ORIGINATES_FROM]->(location:Location)
@@ -857,7 +869,7 @@ class AGEClient:
     async def get_alert(self, alert_id: str) -> Optional[Dict]:
         """Get Alert node properties as flat dict."""
         results = await self.run_query(
-            "MATCH (alert:Alert {alert_id: $alert_id}) RETURN alert",
+            "MATCH (alert:Alert) WHERE alert.alert_id = $alert_id RETURN alert",
             {"alert_id": alert_id},
         )
         if not results:
@@ -1440,12 +1452,12 @@ class AGETransaction:
         *,
         preserve_strings: bool = False,
     ) -> List[Dict[str, Any]]:
-        return self._client._execute_cypher_on_connection(
+        return cast(List[Dict[str, Any]], self._client._execute_cypher_on_connection(
             self._conn,
             cypher,
             parameters,
             preserve_strings=preserve_strings,
-        )
+        ))
 
 
 # ── module-level singleton + factory ──────────────────────────────────────────

@@ -365,12 +365,15 @@ class AGEGraphStoreAdapter:
         chronological: bool = False,
         verified_after: tuple[float, str] | None = None,
     ) -> list[dict[str, Any]]:
-        return self._store.get_verified_decisions(
-            domain,
-            offset=offset,
-            limit=limit,
-            chronological=chronological,
-            verified_after=verified_after,
+        return cast(
+            list[dict[str, Any]],
+            self._store.get_verified_decisions(
+                domain,
+                offset=offset,
+                limit=limit,
+                chronological=chronological,
+                verified_after=verified_after,
+            ),
         )
 
     def get_all_decisions(self, domain: str) -> list[dict[str, Any]]:
@@ -599,12 +602,21 @@ class AGEGraphStoreAdapter:
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
         if include_v2:
-            return self._store.get_centroid_checkpoints(
-                domain,
-                include_v2=True,
-                **kwargs,
+            return cast(
+                list[dict[str, Any]],
+                self._store.get_centroid_checkpoints(
+                    domain,
+                    include_v2=True,
+                    **kwargs,
+                ),
             )
-        return self._store.get_centroid_checkpoints(domain, **kwargs)
+        return cast(
+            list[dict[str, Any]],
+            self._store.get_centroid_checkpoints(domain, **kwargs),
+        )
+
+    def has_centroid_checkpoint(self, checkpoint_id: str, domain: str) -> bool:
+        return bool(self._store.has_centroid_checkpoint(checkpoint_id, domain))
 
     def write_transfer_pattern(
         self,
